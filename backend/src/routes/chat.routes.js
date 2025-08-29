@@ -1,14 +1,14 @@
 import { Router } from "express";
 import mongoose from "mongoose";
-import { requireAuth } from "../middleware/auth.js";
-import ChatConversation from "../models/ChatConversation.js";
-import ChatMessage from "../models/ChatMessage.js";
-import Notification from "../models/Notification.js";
-
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+
+import { requireAuth } from "../middleware/auth.js";
+import ChatConversation from "../models/ChatConversation.js";
+import ChatMessage from "../models/ChatMessage.js";
+import Notification from "../models/Notification.js"; // if you use it elsewhere
 
 const router = Router();
 const isId = (id) => mongoose.Types.ObjectId.isValid((id || "").trim());
@@ -16,13 +16,12 @@ const isId = (id) => mongoose.Types.ObjectId.isValid((id || "").trim());
 /* =========================
    UPLOADS DIRECTORY
    ========================= */
-// server.js serves: app.use("/uploads", express.static(uploadsDir))
-// server file: /project/src/server.js
-// this file:   /project/src/routes/chat.routes.js
-// uploads dir: /project/uploads
+// server.js must have: app.use("/uploads", express.static(uploadsDir))
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Default: projectRoot/uploads
 const uploadsRoot =
   process.env.UPLOAD_DIR || path.join(__dirname, "..", "..", "uploads");
 
@@ -81,7 +80,7 @@ const fileFilter = (_req, file, cb) => {
 
   if (allowedMimes.has(mimetype)) return cb(null, true);
 
-  // Some OS/browsers send application/octet-stream
+  // Some browsers use application/octet-stream
   if (mimetype === "application/octet-stream" && allowedExts.has(ext)) {
     return cb(null, true);
   }
@@ -100,16 +99,15 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
 });
 
-// Helper to read my unread from Map/object on lean docs
+// Read my unread count from a Map or plain object on lean docs
 const getMyUnread = (doc, meStr) => {
   if (!doc?.unread) return 0;
   if (typeof doc.unread.get === "function") return doc.unread.get(meStr) || 0;
   return doc.unread[meStr] || 0;
 };
 
-// Helper to compute absolute base URL for this request
+// Build absolute base URL (e.g. http://localhost:5000)
 function getBaseURL(req) {
-  // Prefer explicit PUBLIC_BASE_URL if provided (e.g. http://localhost:5000)
   const envUrl = (process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
   if (envUrl) return envUrl;
   const proto = req.headers["x-forwarded-proto"] || req.protocol || "http";
@@ -138,7 +136,7 @@ router.get("/conversations", requireAuth, async (req, res) => {
     const shaped = list.map((c) => ({
       _id: c._id,
       participants: c.participants, // [{_id,name,role}, ...]
-      sessionRequest: c.sessionRequest,
+      sessionRequest: c.sessionRequest || null,
       lastMessageAt: c.lastMessageAt,
       lastMessage: c.lastMessage,
       unread: getMyUnread(c, meStr),
@@ -154,31 +152,51 @@ router.get("/conversations", requireAuth, async (req, res) => {
 /**
  * POST /api/chat/conversations/open
  * body: { userId?: string, sessionRequestId?: string }
- * Find/create conversation between me and target; optionally tied to a session request.
+ * Strategy:
+ * 1) If userId present → try to find an existing plain 1:1 DM (NO session filter).
+ * 2) If not found and sessionRequestId provided → try the session-scoped conversation.
+ * 3) If still none → create a plain 1:1 DM (sessionRequest stays null to avoid splitting threads).
  */
 router.post("/conversations/open", requireAuth, async (req, res) => {
   try {
     const me = req.user._id;
-    const meStr = String(me);
     const { userId, sessionRequestId } = req.body || {};
 
     if (!userId && !sessionRequestId) {
-      return res
-        .status(400)
-        .json({ message: "userId or sessionRequestId required" });
+      return res.status(400).json({ message: "userId or sessionRequestId required" });
     }
 
-    const q = { participants: { $all: [me] } };
-    if (userId) q.participants.$all.push(userId);
-    if (sessionRequestId && isId(sessionRequestId))
-      q.sessionRequest = sessionRequestId;
+    let conv = null;
 
-    let conv = await ChatConversation.findOne(q);
+    // 1) Prefer existing pure DM (no session split)
+    if (userId && isId(userId)) {
+      conv = await ChatConversation.findOne({
+        participants: { $all: [me, userId] },
+        sessionRequest: null, // ensure it's the general DM thread
+      });
+      if (!conv) {
+        // fallback: any DM between these two, even if someone accidentally set sessionRequest previously
+        conv = await ChatConversation.findOne({
+          participants: { $all: [me, userId] },
+        });
+      }
+    }
+
+    // 2) Otherwise, if a sessionRequestId is provided, try to find a session-scoped conversation
+    if (!conv && sessionRequestId && isId(sessionRequestId)) {
+      const participants = userId && isId(userId) ? [me, userId] : [me];
+      conv = await ChatConversation.findOne({
+        participants: { $all: participants },
+        sessionRequest: sessionRequestId,
+      });
+    }
+
+    // 3) If still none, create a plain 1:1 DM (no session to avoid thread split)
     if (!conv) {
-      const participants = userId ? [me, userId] : [me];
+      const participants = userId && isId(userId) ? [me, userId] : [me];
       conv = await ChatConversation.create({
         participants,
-        sessionRequest: sessionRequestId || null,
+        sessionRequest: null,
         unread: {},
       });
     }
@@ -189,7 +207,7 @@ router.post("/conversations/open", requireAuth, async (req, res) => {
 
     res.json({
       ...full,
-      unread: getMyUnread(full, meStr),
+      unread: getMyUnread(full, String(me)),
     });
   } catch (err) {
     console.error("POST /api/chat/conversations/open error:", err);
@@ -253,8 +271,18 @@ router.post("/:conversationId/read", requireAuth, async (req, res) => {
       { $addToSet: { readBy: req.user._id } }
     );
 
-    conv.unread.set(String(req.user._id), 0);
-    await conv.save();
+    // conv.unread may be a Map or plain object (depending on schema)
+    try {
+      if (typeof conv.unread?.set === "function") {
+        conv.unread.set(String(req.user._id), 0);
+      } else {
+        conv.unread = conv.unread || {};
+        conv.unread[String(req.user._id)] = 0;
+      }
+      await conv.save();
+    } catch (e) {
+      console.warn("Unread reset warning:", e?.message || e);
+    }
 
     res.json({ ok: true });
   } catch (err) {
@@ -274,7 +302,7 @@ router.post("/:conversationId/read", requireAuth, async (req, res) => {
  * NOTE:
  * - `url` is an ABSOLUTE URL (e.g. http://localhost:5000/uploads/123_file.pdf)
  * - `path` is the relative path (/uploads/123_file.pdf) if you want to store compactly
- * - Ensure server.js serves: app.use("/uploads", express.static(uploadsDir, ...))
+ * - Ensure server.js serves: app.use("/uploads", express.static(uploadsDir))
  */
 router.post(
   "/upload",
@@ -299,14 +327,14 @@ router.post(
   },
   async (req, res) => {
     try {
-      const base = getBaseURL(req); // <- build absolute URL origin
+      const base = getBaseURL(req);
       const files = Array.isArray(req.files) ? req.files : [];
       const items = files.map((f) => {
         const filename = path.basename(f.path);
         const relPath = `/uploads/${filename}`;
         return {
           url: `${base}${relPath}`, // ABSOLUTE URL for immediate opening
-          path: relPath,            // Relative (useful to store in DB)
+          path: relPath,            // Relative (store in DB if you like)
           name: f.originalname,
           mime: f.mimetype,
           size: f.size,

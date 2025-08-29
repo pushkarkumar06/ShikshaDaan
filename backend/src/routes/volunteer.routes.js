@@ -11,21 +11,74 @@ import cloudinary from "../utils/cloudinary.js";
 const router = Router();
 
 /* ======================================
-   Helpers / Multer (avatar upload only)
+   Helpers
    ====================================== */
 const MAX_AVATAR_MB = parseInt(process.env.MAX_AVATAR_MB || "6", 10);
 const AVATAR_FOLDER = process.env.CLOUDINARY_AVATAR_FOLDER || "ShikshaDaan/avatars";
 
-// Quick health check for Cloudinary config (helps produce 1 clear error)
 function assertCloudinaryConfig() {
   if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-    const msg = "Cloudinary env missing. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET.";
-    const err = new Error(msg);
+    const err = new Error(
+      "Cloudinary env missing. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET."
+    );
     err.statusCode = 500;
     throw err;
   }
 }
 
+const toArrayOfStrings = (v) =>
+  Array.isArray(v)
+    ? v.map((x) => (typeof x === "string" ? x.trim() : String(x || "")).trim()).filter(Boolean)
+    : [];
+
+const toNumberOrNull = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+// location can be string "City, Country" or object { city, state, country, lat, lng }
+const parseLocation = (loc) => {
+  if (!loc) return undefined;
+  if (typeof loc === "string") {
+    const s = loc.trim();
+    if (!s) return undefined;
+    // very light parse: "City, State, Country" / "City, Country"
+    const parts = s.split(",").map((p) => p.trim()).filter(Boolean);
+    if (parts.length === 1) return { city: parts[0] };
+    if (parts.length === 2) return { city: parts[0], country: parts[1] };
+    return { city: parts[0], state: parts[1], country: parts[2] };
+  }
+  if (typeof loc === "object") {
+    const out = {};
+    if (loc.city) out.city = String(loc.city).trim();
+    if (loc.state) out.state = String(loc.state).trim();
+    if (loc.country) out.country = String(loc.country).trim();
+    if (loc.lat != null) out.lat = Number(loc.lat);
+    if (loc.lng != null) out.lng = Number(loc.lng);
+    return out;
+  }
+  return undefined;
+};
+
+// availability helpers
+const SLOT_REGEX = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
+const isValidSlot = (s) => SLOT_REGEX.test(s);
+const normalizeDate = (d) => (d || "").trim();
+const sanitizeAvailability = (arr) => {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((a) => ({
+      date: typeof a?.date === "string" ? a.date.trim() : "",
+      slots: toArrayOfStrings(a?.slots).filter(isValidSlot),
+    }))
+    .filter((a) => a.date && a.slots.length);
+};
+
+/* ======================================
+   Multer (avatar/photo upload – memory)
+   Accept **either** field name: avatar OR photo
+   ====================================== */
 const imageMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const avatarFilter = (_req, file, cb) => {
   if (!imageMimes.has(file.mimetype)) return cb(new Error("Only image uploads are allowed"));
@@ -37,132 +90,142 @@ const uploadAvatar = multer({
   limits: { fileSize: MAX_AVATAR_MB * 1024 * 1024 },
 });
 
-// upload buffer to Cloudinary
+// Cloudinary upload from buffer
 function uploadBufferToCloudinary(buffer) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: AVATAR_FOLDER,
-        resource_type: "image",
-      },
+      { folder: AVATAR_FOLDER, resource_type: "image" },
       (err, result) => (err ? reject(err) : resolve(result))
     );
     stream.end(buffer);
   });
 }
 
-// unified handler to finish avatar update after multer
-async function setAvatarFromUpload(req, res) {
-  try {
-    assertCloudinaryConfig();
-
-    if (!req.file || !req.file.buffer) {
-      return res.status(400).json({ message: "No file uploaded. Use form-data field: avatar" });
-    }
-
-    // ensure profile doc exists
-    let vol = await Volunteer.findOne({ userId: req.user._id });
-    if (!vol) vol = await Volunteer.create({ userId: req.user._id });
-
-    // delete old avatar if present (non-fatal if it fails)
-    const oldPublicId = vol?.profilePicture?.publicId;
-    if (oldPublicId) {
-      try {
-        await cloudinary.uploader.destroy(oldPublicId);
-      } catch (e) {
-        console.warn("Cloudinary destroy (old avatar) failed:", e?.message || e);
-      }
-    }
-
-    // upload new
-    const result = await uploadBufferToCloudinary(req.file.buffer);
-    vol.profilePicture = { url: result.secure_url, publicId: result.public_id };
-    await vol.save();
-
-    const profile = await Volunteer.findById(vol._id).lean();
-    return res.json({
-      message: "Avatar updated",
-      photoUrl: profile?.profilePicture?.url || null,
-      profile,
-    });
-  } catch (err) {
-    console.error("Avatar upload error:", err?.message || err);
-    return res
-      .status(err.statusCode || 500)
-      .json({ message: err.message || "Server error" });
-  }
-}
-
-/* =========================
-   LIST VOLUNTEERS
-   ========================= */
+/* ======================================
+   List Volunteers (public)
+   ====================================== */
+/**
+ * GET /api/volunteers
+ * Optional: ?subject=Math
+ * Returns public fields + computed photoUrl for old UI
+ */
 router.get("/", async (req, res) => {
   try {
     const { subject } = req.query;
     const q = subject ? { subjects: subject } : {};
+
     const list = await Volunteer.find(q)
       .select(
-        "userId education experience bio subjects languages hourlyRate specialties location timezone profilePicture"
+        "userId education experience bio subjects languages hourlyRate specialties location timezone avatar"
       )
-      .limit(20)
+      .limit(30)
       .lean();
-    return res.json(list);
+
+    // add photoUrl for frontend compatibility
+    const shaped = (list || []).map((v) => ({
+      ...v,
+      photoUrl: v?.avatar?.url || null,
+    }));
+
+    return res.json(shaped);
   } catch (err) {
     console.error("GET /volunteers failed:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
 
-/* =========================
-   UPDATE OWN PROFILE
-   ========================= */
+/* ======================================
+   Update own profile
+   ====================================== */
+/**
+ * PUT /api/volunteers/me
+ * Body can include:
+ *  education, experience, bio,
+ *  subjects[], languages[], specialties[],
+ *  hourlyRate (number >= 0),
+ *  timezone (string),
+ *  location (string or {city,state,country,lat,lng}),
+ *  availability[] (validated),
+ *  photoUrl (OPTIONAL – sets avatar.url only; for legacy/manual URLs)
+ */
 router.put("/me", requireAuth, requireRole("volunteer"), async (req, res) => {
   try {
-    const allowed = [
-      "education",
-      "experience",
-      "bio",
-      "subjects",
-      "languages",
-      "hourlyRate",
-      "availability",
-      "specialties",
-      "location",
-      "timezone",
-    ];
-    const update = {};
-    for (const k of allowed) if (k in req.body) update[k] = req.body[k];
+    const payload = {};
 
-    const profile = await Volunteer.findOneAndUpdate(
+    if ("education" in req.body) payload.education = String(req.body.education || "").trim();
+    if ("experience" in req.body) payload.experience = String(req.body.experience || "").trim();
+    if ("bio" in req.body) payload.bio = String(req.body.bio || "").trim();
+
+    if ("subjects" in req.body) payload.subjects = toArrayOfStrings(req.body.subjects);
+    if ("languages" in req.body) payload.languages = toArrayOfStrings(req.body.languages);
+    if ("specialties" in req.body) payload.specialties = toArrayOfStrings(req.body.specialties);
+
+    if ("hourlyRate" in req.body) {
+      const n = toNumberOrNull(req.body.hourlyRate);
+      if (n === null || n < 0) {
+        return res.status(400).json({ message: "hourlyRate must be a non-negative number" });
+      }
+      payload.hourlyRate = n;
+    }
+
+    if ("timezone" in req.body) payload.timezone = String(req.body.timezone || "").trim();
+    if ("location" in req.body) {
+      const loc = parseLocation(req.body.location);
+      if (loc) payload.location = loc;
+      else payload.location = undefined;
+    }
+
+    if ("availability" in req.body) payload.availability = sanitizeAvailability(req.body.availability);
+
+    // legacy/manual: allow directly setting a photoUrl (not destroying any previous avatar)
+    if ("photoUrl" in req.body) {
+      const u = String(req.body.photoUrl || "").trim();
+      if (u) payload.avatar = { ...(payload.avatar || {}), url: u };
+      else payload.avatar = undefined;
+    }
+
+    const updated = await Volunteer.findOneAndUpdate(
       { userId: req.user._id },
-      { $set: update },
-      { new: true, upsert: true }
-    ).lean();
+      { $set: payload },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+    )
+      .select(
+        "userId education experience bio subjects languages hourlyRate specialties location timezone availability avgRating ratingsCount avatar"
+      )
+      .lean();
 
-    return res.json(profile);
+    // add photoUrl for FE
+    return res.json({ ...updated, photoUrl: updated?.avatar?.url || null });
   } catch (err) {
+    if (err?.name === "ValidationError") {
+      return res.status(400).json({ message: err.message });
+    }
     console.error("PUT /volunteers/me failed:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
 
-/* =========================
-   GET OWN PROFILE (helpful for FE)
-   ========================= */
+/* ======================================
+   Get own profile (simple)
+   ====================================== */
 router.get("/me", requireAuth, async (req, res) => {
   try {
-    const profile = await Volunteer.findOne({ userId: req.user._id }).lean();
+    const profile = await Volunteer.findOne({ userId: req.user._id })
+      .select(
+        "userId education experience bio subjects languages hourlyRate specialties location timezone availability avgRating ratingsCount avatar"
+      )
+      .lean();
     if (!profile) return res.json(null);
-    return res.json(profile);
+    return res.json({ ...profile, photoUrl: profile?.avatar?.url || null });
   } catch (err) {
     console.error("GET /volunteers/me failed:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
 
-/* =========================
-   GET PUBLIC PROFILE (+reviews)
-   ========================= */
+/* ======================================
+   Get public profile + reviews
+   ====================================== */
 router.get("/:userId", async (req, res) => {
   try {
     const userId = (req.params.userId || "").trim();
@@ -172,7 +235,7 @@ router.get("/:userId", async (req, res) => {
 
     const profile = await Volunteer.findOne({ userId })
       .select(
-        "userId education experience bio subjects languages hourlyRate specialties location timezone availability avgRating ratingsCount profilePicture"
+        "userId education experience bio subjects languages hourlyRate specialties location timezone availability avgRating ratingsCount avatar"
       )
       .lean();
 
@@ -183,20 +246,16 @@ router.get("/:userId", async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json({ profile, reviews });
+    return res.json({ profile: { ...profile, photoUrl: profile?.avatar?.url || null }, reviews });
   } catch (err) {
     console.error("GET /volunteers/:userId failed:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
 
-/* =========================
-   AVAILABILITY
-   ========================= */
-const SLOT_REGEX = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
-const isValidSlot = (s) => SLOT_REGEX.test(s);
-const normalizeDate = (d) => (d || "").trim();
-
+/* ======================================
+   Availability
+   ====================================== */
 router.get("/:userId/availability", async (req, res) => {
   try {
     const userId = (req.params.userId || "").trim();
@@ -286,72 +345,105 @@ router.patch("/me/availability", requireAuth, requireRole("volunteer"), async (r
   }
 });
 
-/* =========================
-   AVATAR UPLOAD / DELETE
-   ========================= */
+/* ======================================
+   Avatar upload / delete
+   - Accepts **avatar** OR **photo** field names
+   - Returns photoUrl for FE
+   ====================================== */
+function avatarMiddleware(req, res, next) {
+  // accept either field name: avatar OR photo
+  const handler = uploadAvatar.fields([
+    { name: "avatar", maxCount: 1 },
+    { name: "photo",  maxCount: 1 },
+  ]);
+  handler(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      const code = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+      return res.status(code).json({
+        message: err.code === "LIMIT_FILE_SIZE" ? `File too large. Max ${MAX_AVATAR_MB}MB` : err.message,
+      });
+    }
+    if (err) return res.status(400).json({ message: err.message || "Upload failed" });
+    next();
+  });
+}
 
-// Primary endpoint
-router.post(
-  "/me/avatar",
-  requireAuth,
-  requireRole("volunteer"),
-  (req, res, next) => {
-    const handler = uploadAvatar.single("avatar");
-    handler(req, res, (err) => {
-      if (err instanceof multer.MulterError) {
-        const code = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
-        return res.status(code).json({
-          message:
-            err.code === "LIMIT_FILE_SIZE"
-              ? `File too large. Max ${MAX_AVATAR_MB}MB`
-              : err.message,
-        });
+async function setAvatarFromUpload(req, res) {
+  try {
+    assertCloudinaryConfig();
+    // pick whichever was sent
+    const f1 = req.files?.avatar?.[0];
+    const f2 = req.files?.photo?.[0];
+    const file = f1 || f2;
+
+    if (!file || !file.buffer) {
+      return res.status(400).json({ message: "No file uploaded. Use field 'avatar' or 'photo'." });
+    }
+
+    let vol = await Volunteer.findOne({ userId: req.user._id });
+    if (!vol) vol = await Volunteer.create({ userId: req.user._id });
+
+    // delete old on Cloudinary (non-fatal)
+    const oldPublicId = vol?.avatar?.publicId;
+    if (oldPublicId) {
+      try {
+        await cloudinary.uploader.destroy(oldPublicId);
+      } catch (e) {
+        console.warn("Cloudinary destroy (old avatar) failed:", e?.message || e);
       }
-      if (err) return res.status(400).json({ message: err.message || "Upload failed" });
-      next();
-    });
-  },
-  setAvatarFromUpload
-);
+    }
 
-// Alias for your current frontend call
-router.post(
-  "/me/photo",
-  requireAuth,
-  requireRole("volunteer"),
-  (req, res, next) => {
-    const handler = uploadAvatar.single("avatar");
-    handler(req, res, (err) => {
-      if (err instanceof multer.MulterError) {
-        const code = err.code === "LIMIT_FILE_SIZE" ? 413 : 400;
-        return res.status(code).json({
-          message:
-            err.code === "LIMIT_FILE_SIZE"
-              ? `File too large. Max ${MAX_AVATAR_MB}MB`
-              : err.message,
-        });
-      }
-      if (err) return res.status(400).json({ message: err.message || "Upload failed" });
-      next();
-    });
-  },
-  setAvatarFromUpload
-);
+    // upload new
+    const result = await uploadBufferToCloudinary(file.buffer);
+    vol.avatar = {
+      publicId: result.public_id,
+      url: result.secure_url,
+      width: result.width,
+      height: result.height,
+      format: result.format,
+      bytes: result.bytes,
+      folder: result.folder,
+    };
+    await vol.save();
 
+    const profile = await Volunteer.findById(vol._id)
+      .select(
+        "userId education experience bio subjects languages hourlyRate specialties location timezone availability avgRating ratingsCount avatar"
+      )
+      .lean();
+
+    return res.json({
+      message: "Avatar updated",
+      photoUrl: profile?.avatar?.url || null,
+      profile: { ...profile, photoUrl: profile?.avatar?.url || null },
+    });
+  } catch (err) {
+    console.error("Avatar upload error:", err?.message || err);
+    return res.status(err.statusCode || 500).json({ message: err.message || "Server error" });
+  }
+}
+
+// POST /me/avatar  (primary)
+router.post("/me/avatar", requireAuth, requireRole("volunteer"), avatarMiddleware, setAvatarFromUpload);
+
+// POST /me/photo   (alias used by your FE)
+router.post("/me/photo", requireAuth, requireRole("volunteer"), avatarMiddleware, setAvatarFromUpload);
+
+// DELETE /me/avatar
 router.delete("/me/avatar", requireAuth, requireRole("volunteer"), async (req, res) => {
   try {
     assertCloudinaryConfig();
     const vol = await Volunteer.findOne({ userId: req.user._id });
     if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
 
-    if (vol.profilePicture?.publicId) {
+    if (vol.avatar?.publicId) {
       try {
-        await cloudinary.uploader.destroy(vol.profilePicture.publicId);
+        await cloudinary.uploader.destroy(vol.avatar.publicId);
       } catch (e) {
         console.warn("Cloudinary destroy failed:", e?.message || e);
       }
     }
-    vol.profilePicture = undefined;
+    vol.avatar = undefined;
     await vol.save();
     return res.json({ ok: true });
   } catch (err) {

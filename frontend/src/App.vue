@@ -513,7 +513,7 @@ const profileForm = reactive({
   location: '',
   timezone: '',
   specialties: [],
-  photoUrl: '' // URL (Cloudinary) – tolerant to profilePicture.url
+  photoUrl: '' // URL (Cloudinary)
 })
 const profileRaw = ref('')
 const profileSubjects = ref('')
@@ -590,9 +590,12 @@ function fileURL(u) {
   return /^https?:\/\//i.test(u) ? u : `${WS_URL}${u}`
 }
 
-// Explore card – accept both shapes
+// Explore card – accept both shapes (profilePicture|avatar)
 function volPhoto(v) {
-  return v.photoUrl || (v.profilePicture && v.profilePicture.url) || ''
+  return v.photoUrl
+    || (v.profilePicture && v.profilePicture.url)
+    || (v.avatar && v.avatar.url)
+    || ''
 }
 
 // --------- api (supports FormData) ---------
@@ -663,20 +666,20 @@ async function loadMyProfile() {
     profileRaw.value = JSON.stringify(data, null, 2)
     const p = data.profile || {}
 
-    profileForm.education   = p.education || ''
-    profileForm.experience  = p.experience || ''
-    profileForm.bio         = p.bio || ''
-    profileForm.subjects    = p.subjects || []
-    profileForm.languages   = p.languages || []
-    profileForm.hourlyRate  = typeof p.hourlyRate === 'number' ? p.hourlyRate : 0
-    profileForm.location    = p.location || ''
-    profileForm.timezone    = p.timezone || ''
-    profileForm.specialties = Array.isArray(p.specialties) ? p.specialties : []
-    profileForm.photoUrl    = p.photoUrl || (p.profilePicture && p.profilePicture.url) || ''
+    profileForm.education    = p.education || ''
+    profileForm.experience   = p.experience || ''
+    profileForm.bio          = p.bio || ''
+    profileForm.subjects     = p.subjects || []
+    profileForm.languages    = p.languages || []
+    profileForm.hourlyRate   = typeof p.hourlyRate === 'number' ? p.hourlyRate : 0
+    profileForm.location     = p.location || ''
+    profileForm.timezone     = p.timezone || ''
+    profileForm.specialties  = Array.isArray(p.specialties) ? p.specialties : []
+    profileForm.photoUrl     = p.photoUrl || (p.profilePicture && p.profilePicture.url) || (p.avatar && p.avatar.url) || ''
 
-    profileSubjects.value   = profileForm.subjects.join(', ')
-    profileLanguages.value  = profileForm.languages.join(', ')
-    profileSpecialties.value= profileForm.specialties.join(', ')
+    profileSubjects.value    = profileForm.subjects.join(', ')
+    profileLanguages.value   = profileForm.languages.join(', ')
+    profileSpecialties.value = profileForm.specialties.join(', ')
   } catch (e) { alert(e.message) }
 }
 async function saveProfile() {
@@ -706,8 +709,9 @@ async function uploadProfilePhoto(evt) {
   if (!file) return
   try {
     const fd = new FormData()
-    fd.append('photo', file)
-    const data = await api('/volunteers/me/photo', { method: 'POST', body: fd })
+    // IMPORTANT: backend expects 'avatar' on /me/avatar (and also on /me/photo alias)
+    fd.append('avatar', file)
+    const data = await api('/volunteers/me/avatar', { method: 'POST', body: fd })
     profileForm.photoUrl = data.photoUrl || ''
     await loadMyProfile()
   } catch (e) {
@@ -936,18 +940,26 @@ async function markConversationRead(conversationId) {
   socket.value?.emit("conversation:read", { conversationId })
 }
 
-// start chat
+// start chat (always 1:1 DM)
 async function startChatWith(targetUserId) {
   if (!user.value) return alert('Login first')
-  const conv = await api('/chat/conversations/open', { method: 'POST', body: JSON.stringify({ userId: targetUserId }) })
+  const conv = await api('/chat/conversations/open', {
+    method: 'POST',
+    body: JSON.stringify({ userId: targetUserId }) // <- single DM
+  })
   await loadConversations()
   const found = conversations.value.find(x => String(x._id) === String(conv._id)) || conv
   tab.value = 'chats'
   await openConversation(found)
 }
+
+// open chat from session -> also route to the SAME 1:1 DM
 async function openChatForSession(req) {
   const otherId = (String(req.volunteer) === String(user.value._id)) ? req.target : req.volunteer
-  const conv = await api('/chat/conversations/open', { method: 'POST', body: JSON.stringify({ userId: otherId, sessionRequestId: req._id }) })
+  const conv = await api('/chat/conversations/open', {
+    method: 'POST',
+    body: JSON.stringify({ userId: otherId }) // <- IMPORTANT: no sessionRequestId
+  })
   await loadConversations()
   const found = conversations.value.find(x => String(x._id) === String(conv._id)) || conv
   tab.value = 'chats'
@@ -1002,3 +1014,4 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
   min-width: 0;
 }
 </style>
+
