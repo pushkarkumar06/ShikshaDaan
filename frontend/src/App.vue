@@ -35,6 +35,7 @@
     <div class="tabs">
       <div class="tab" :class="{active: tab==='auth'}" @click="switchTab('auth')">Auth</div>
       <div class="tab" :class="{active: tab==='volunteer'}" @click="switchTab('volunteer')">Volunteer</div>
+      <div class="tab" :class="{active: tab==='student'}" @click="switchTab('student')">Student</div>
       <div class="tab" :class="{active: tab==='explore'}" @click="switchTab('explore')">Explore</div>
       <div class="tab" :class="{active: tab==='stats'}" @click="switchTab('stats')">Stats</div>
       <div class="tab" :class="{active: tab==='sessions'}" @click="switchTab('sessions')">Requests</div>
@@ -203,6 +204,60 @@
         <div class="row" style="margin-top:10px"><button @click="saveDayReplace">Save Day (replace)</button></div>
       </div>
     </div>
+
+
+    <div v-if="tab==='student'" class="card">
+  <h2>Student Profile</h2>
+  <p class="small" v-if="!isStudent">Login as a <b>student</b> to edit profile.</p>
+
+  <div v-if="isStudent">
+    <div class="row" style="align-items:flex-start; gap:16px">
+      <!-- Avatar -->
+      <div class="card" style="min-width:180px; text-align:center">
+        <div class="small" style="margin-bottom:6px">Profile Picture</div>
+        <img v-if="studentForm.photoUrl"
+             :src="studentForm.photoUrl"
+             alt="Profile"
+             style="width:120px; height:120px; object-fit:cover; border-radius:50%; border:1px solid #e2e8f0" />
+        <div v-else class="small"
+             style="width:120px; height:120px; display:flex; align-items:center; justify-content:center; border:1px dashed #cbd5e1; border-radius:50%">
+          No photo
+        </div>
+        <label class="ghost" style="margin-top:8px; display:inline-block; cursor:pointer">
+          <input type="file" accept="image/*" style="display:none" @change="uploadStudentPhoto" />
+          Upload Photo
+        </label>
+      </div>
+
+      <!-- Basic fields -->
+      <div style="flex:1">
+        <div class="row">
+          <div style="flex:1"><label>College</label><input v-model="studentForm.college" placeholder="IIT Bombay" /></div>
+          <div style="flex:1"><label>Course</label><input v-model="studentForm.course" placeholder="B.Tech CSE" /></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div style="flex:1"><label>Year</label><input v-model="studentForm.year" placeholder="2nd Year" /></div>
+          <div style="flex:1"><label>Interests (comma separated)</label><input v-model="studentInterests" placeholder="Math, AI, Web Dev" /></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:10px">
+      <label>Bio</label>
+      <textarea v-model="studentForm.bio" placeholder="Tell something about yourself..."></textarea>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <button @click="saveStudentProfile">Save Profile</button>
+      <button class="ghost" @click="loadMyStudentProfile">Reload My Profile</button>
+    </div>
+
+    <div v-if="studentRaw" class="card" style="margin-top:10px">
+      <div class="small">Current profile (raw)</div>
+      <pre>{{ studentRaw }}</pre>
+    </div>
+  </div>
+</div>
 
     <!-- EXPLORE -->
     <div v-if="tab==='explore'" class="card">
@@ -1014,4 +1069,5 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
   min-width: 0;
 }
 </style>
+
 

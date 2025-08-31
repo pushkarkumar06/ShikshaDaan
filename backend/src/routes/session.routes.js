@@ -1,133 +1,209 @@
+// src/routes/session.routes.js
 import { Router } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import mongoose from "mongoose";
+import { requireAuth, requireRole } from "../middleware/auth.js";
 import SessionRequest from "../models/SessionRequest.js";
 import Notification from "../models/Notification.js";
 import { createZoomMeetingStub } from "../services/zoom.js";
-import Volunteer from "../models/volunteer.js"; // match your actual filename/case
+import Volunteer from "../models/volunteer.js";
 import { awardBadgesForVolunteer } from "../services/badges.js";
+
 const router = Router();
 
-// Volunteer sends session request to a student/org
-router.post("/request", requireAuth, async (req, res) => {
-  const { target, subject, message, date, time } = req.body;
-  if (req.user.role !== "volunteer") return res.status(403).json({ message: "Only volunteers can start requests" });
-
-  const sr = await SessionRequest.create({
-    volunteer: req.user._id, target, subject, message,
-    proposed: { date, time }
-  });
-
-  await Notification.create({ user: target, type: "session_request", payload: { requestId: sr._id } });
-  res.json(sr);
-});
-
-// Target accepts/sets final schedule => validates against availability and books the slot
-router.post("/:id/accept", requireAuth, async (req, res) => {
-  try {
-    const { date, time } = req.body;
-    if (!date || !time) {
-      return res.status(400).json({ message: "date and time are required" });
-    }
-
-    const sr = await SessionRequest.findById(req.params.id);
-    if (!sr) return res.status(404).json({ message: "Not found" });
-
-    // Only the request "target" can accept
-    if (String(sr.target) !== String(req.user._id)) {
-      return res.status(403).json({ message: "Only target can accept" });
-    }
-
-    // Validate against volunteer availability
-    // NOTE: sr.volunteer stores the volunteer's *userId* in your schema
-    const vol = await Volunteer.findOne({ userId: sr.volunteer });
-    if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
-
-    // We store availability as [{ date: "YYYY-MM-DD", slots: ["HH:mm-HH:mm", ...] }]
-    const day = (vol.availability || []).find(a => a.date === date);
-    if (!day || !day.slots.includes(time)) {
-      return res.status(400).json({ message: "Selected date/time not available" });
-    }
-
-    // Create meeting link (stub)
-    const zoomLink = await createZoomMeetingStub({ topic: sr.subject, date, time });
-
-    // Mark scheduled
-    sr.status = "scheduled";
-    sr.final = { date, time, zoomLink };
-    await sr.save();
-    // After scheduling, award badges to the volunteer
-    await awardBadgesForVolunteer(sr.volunteer);
-
-
-    // Remove the booked slot from availability to prevent double booking
-    day.slots = day.slots.filter(s => s !== time);
-    // Optional: remove the day entirely if no slots remain
-    // vol.availability = vol.availability.filter(a => a.date !== date || a.slots.length > 0);
-    await vol.save();
-
-    // Notify volunteer that it has been accepted
-    await Notification.create({
-      user: sr.volunteer,
-      type: "session_accept",
-      payload: { requestId: sr._id }
-    });
-
-    return res.json(sr);
-  } catch (err) {
-    console.error("POST /sessions/:id/accept failed:", err);
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-
-
-// Get my requests (as volunteer or target)
-router.get("/mine", requireAuth, async (req, res) => {
-  const list = await SessionRequest.find({
-    $or: [{ volunteer: req.user._id }, { target: req.user._id }]
-  }).sort({ createdAt: -1 });
-  res.json(list);
-});
-
-
-// NEW: student -> volunteer (pick slot from availability)
-router.post("/request-to-volunteer", requireAuth, async (req, res) => {
+/**
+ * STUDENT -> VOLUNTEER
+ * Create a session request
+ */
+router.post("/request", requireAuth, requireRole("student"), async (req, res) => {
   try {
     const { volunteerId, subject, message, date, slot } = req.body;
 
-    if (!volunteerId || !date || !slot) {
-      return res.status(400).json({ message: "volunteerId, date and slot are required" });
+    if (!volunteerId || !subject) {
+      return res.status(400).json({ message: "volunteerId and subject are required" });
     }
 
-    // Validate availability
-    const vol = await Volunteer.findOne({ userId: volunteerId });
-    if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
+    // validate volunteer availability if provided
+    if (date && slot) {
+      const vol = await Volunteer.findOne({ userId: volunteerId });
+      if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
 
-    const day = (vol.availability || []).find(a => a.date === date);
-    if (!day || !day.slots.includes(slot)) {
-      return res.status(400).json({ message: "Selected slot not available" });
+      const day = (vol.availability || []).find((a) => a.date === date);
+      if (!day || !day.slots.includes(slot)) {
+        return res.status(400).json({ message: "Selected slot not available" });
+      }
     }
 
-    // Create pending request (volunteer will accept)
     const sr = await SessionRequest.create({
-      volunteer: volunteerId,      // the volunteer userId
-      target: req.user._id,        // student initiating
+      createdBy: req.user._id,
+      student: req.user._id,
+      volunteer: volunteerId,
       subject,
       message,
-      proposed: { date, time: slot } // keep time as slot string
+      proposed: date && slot ? { date, time: slot } : undefined,
+      status: "pending",
     });
 
     await Notification.create({
       user: volunteerId,
       type: "session_request",
-      payload: { requestId: sr._id }
+      payload: { requestId: sr._id },
     });
 
-    return res.json(sr);
+    return res.status(201).json(sr);
   } catch (err) {
-    console.error("POST /sessions/request-to-volunteer failed:", err);
+    console.error("POST /sessions/request failed:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
 
+/**
+ * VOLUNTEER -> STUDENT
+ * Volunteer offers a session proactively
+ */
+router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) => {
+  try {
+    const { studentId, subject, message, date, time } = req.body;
+
+    if (!studentId || !subject) {
+      return res.status(400).json({ message: "studentId and subject are required" });
+    }
+
+    const sr = await SessionRequest.create({
+      createdBy: req.user._id,
+      student: studentId,
+      volunteer: req.user._id,
+      subject,
+      message,
+      proposed: date && time ? { date, time } : undefined,
+      status: "pending",
+    });
+
+    await Notification.create({
+      user: studentId,
+      type: "session_offer",
+      payload: { requestId: sr._id },
+    });
+
+    return res.status(201).json(sr);
+  } catch (err) {
+    console.error("POST /sessions/offer failed:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+/**
+ * VOLUNTEER updates session status (accept/reject/schedule/complete/cancel)
+ */
+router.put("/:id/status", requireAuth, requireRole("volunteer"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, date, time } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid session id" });
+    }
+
+    if (!["accepted", "rejected", "scheduled", "completed", "cancelled"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const sr = await SessionRequest.findOne({ _id: id, volunteer: req.user._id });
+    if (!sr) return res.status(404).json({ message: "Session not found" });
+
+    if (status === "scheduled") {
+      if (!date || !time) {
+        return res.status(400).json({ message: "date and time required to schedule" });
+      }
+
+      const vol = await Volunteer.findOne({ userId: req.user._id });
+      if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
+
+      const day = (vol.availability || []).find((a) => a.date === date);
+      if (!day || !day.slots.includes(time)) {
+        return res.status(400).json({ message: "Selected slot not available" });
+      }
+
+      const zoomLink = await createZoomMeetingStub({ topic: sr.subject, date, time });
+      sr.final = { date, time, zoomLink };
+      sr.status = "scheduled";
+
+      // remove booked slot
+      day.slots = day.slots.filter((s) => s !== time);
+      await vol.save();
+
+      // award badges
+      await awardBadgesForVolunteer(req.user._id);
+    } else {
+      sr.status = status;
+    }
+
+    await sr.save();
+
+    await Notification.create({
+      user: sr.student,
+      type: "session_update",
+      payload: { requestId: sr._id, status: sr.status },
+    });
+
+    return res.json(sr);
+  } catch (err) {
+    console.error("PUT /sessions/:id/status failed:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+/**
+ * Get all my session requests (student or volunteer)
+ */
+router.get("/mine", requireAuth, async (req, res) => {
+  try {
+    const filter =
+      req.user.role === "student"
+        ? { student: req.user._id }
+        : req.user.role === "volunteer"
+        ? { volunteer: req.user._id }
+        : {};
+
+    const sessions = await SessionRequest.find(filter)
+      .populate("student", "name email")
+      .populate("volunteer", "name email")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json(sessions);
+  } catch (err) {
+    console.error("GET /sessions/mine failed:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+/**
+ * Student leaves feedback after completion
+ */
+router.post("/:id/feedback", requireAuth, requireRole("student"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rating, comment } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid session id" });
+    }
+
+    const sr = await SessionRequest.findOne({ _id: id, student: req.user._id });
+    if (!sr) return res.status(404).json({ message: "Session not found" });
+
+    if (sr.status !== "completed") {
+      return res.status(400).json({ message: "Feedback allowed only after completion" });
+    }
+
+    sr.feedback = { rating, comment };
+    await sr.save();
+
+    return res.json(sr);
+  } catch (err) {
+    console.error("POST /sessions/:id/feedback failed:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
 
 export default router;
