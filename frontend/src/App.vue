@@ -14,8 +14,14 @@
       </div>
       <div class="row">
         <button class="ghost" @click="switchTab('auth')">Auth</button>
-        <button class="ghost" @click="switchTab('volunteer')">Volunteer Profile</button>
-        <button class="ghost" @click="switchTab('explore')">Explore Volunteers</button>
+        <button 
+  v-if="user && user.role === 'volunteer'" 
+  class="ghost" 
+  @click="switchTab('volunteer')"
+>
+  Volunteer Profile
+</button>
+        <button class="ghost" @click="switchTab('explore')">Explore</button>
         <button class="ghost" @click="switchTab('stats')">Stats</button>
         <button class="ghost" @click="switchTab('sessions')">My Requests</button>
         <button class="ghost" @click="switchTab('notifications')">Notifications</button>
@@ -34,8 +40,24 @@
     <!-- Tabs -->
     <div class="tabs">
       <div class="tab" :class="{active: tab==='auth'}" @click="switchTab('auth')">Auth</div>
-      <div class="tab" :class="{active: tab==='volunteer'}" @click="switchTab('volunteer')">Volunteer</div>
-      <div class="tab" :class="{active: tab==='student'}" @click="switchTab('student')">Student</div>
+     <div 
+  v-if="user && user.role === 'volunteer'" 
+  class="tab" 
+  :class="{active: tab==='volunteer'}" 
+  @click="switchTab('volunteer')"
+>
+  Volunteer
+</div>
+
+      <div 
+  v-if="user && user.role === 'student'" 
+  class="tab" 
+  :class="{active: tab==='student'}" 
+  @click="switchTab('student')"
+>
+  Student
+</div>
+
       <div class="tab" :class="{active: tab==='explore'}" @click="switchTab('explore')">Explore</div>
       <div class="tab" :class="{active: tab==='stats'}" @click="switchTab('stats')">Stats</div>
       <div class="tab" :class="{active: tab==='sessions'}" @click="switchTab('sessions')">Requests</div>
@@ -259,61 +281,123 @@
   </div>
 </div>
 
-    <!-- EXPLORE -->
-    <div v-if="tab==='explore'" class="card">
-      <h2>Explore Volunteers</h2>
-      <div class="row">
-        <div style="flex:1"><label>Filter by subject</label><input v-model="exploreSubject" placeholder="e.g. Math" /></div>
-        <button @click="loadVolunteers">Search</button>
-      </div>
-      <div class="row" style="margin-top:10px;">
-        <div v-for="v in volunteers" :key="v._id" class="card" style="flex:1; min-width:260px;">
-          <div class="row" style="gap:10px; align-items:center">
-            <img
-              v-if="volPhoto(v)"
-              :src="volPhoto(v)"
-              alt=""
-              style="width:52px; height:52px; border-radius:50%; object-fit:cover; border:1px solid #e2e8f0"
-            >
-            <div>
-              <div><b>Volunteer</b></div>
-              <div class="small">userId: {{ v.userId }}</div>
-            </div>
-          </div>
-          <div class="small" style="margin-top:6px">
-            <span v-if="v.location">{{ v.location }}</span>
-            <span v-if="v.timezone"> • {{ v.timezone }}</span>
-            <span v-if="v.hourlyRate !== undefined"> • ₹{{ v.hourlyRate }}/hr</span>
-          </div>
-          <div>Subjects: {{ (v.subjects||[]).join(", ") }}</div>
-          <div v-if="(v.specialties||[]).length" class="small">Specialties: {{ v.specialties.join(", ") }}</div>
-          <div>Bio: {{ v.bio || '-' }}</div>
-          <div class="row" style="margin-top:8px">
-            <button v-if="user && user._id !== v.userId" @click="startChatWith(v.userId)">Message</button>
-            <button v-if="user && !isFollowingId(v.userId) && user._id !== v.userId" @click="followUser(v.userId)">Follow</button>
-            <button v-if="user && isFollowingId(v.userId)" class="ghost" @click="unfollowById(v.userId)">Unfollow</button>
-          </div>
+
+
+<!-- EXPLORE -->
+<div v-if="tab==='explore'" class="card">
+  <!-- Heading -->
+  <h2 v-if="isStudent">Explore Volunteers</h2>
+  <h2 v-if="isVolunteer">Explore Students</h2>
+
+  <!-- Search bar -->
+  <div class="row">
+    <div style="flex:1">
+      <label>{{ isStudent ? 'Filter by subject' : 'Search by Student UserId' }}</label>
+      <input v-model="exploreId" :placeholder="isStudent ? 'e.g. Math' : 'paste student userId'" />
+    </div>
+    <button @click="loadExploreById">Search</button>
+  </div>
+
+  <!-- Extra filter for subject/interest -->
+  <div class="row" style="margin-top:10px">
+    <div style="flex:1">
+      <label>{{ isStudent ? 'Filter by subject' : 'Filter by interest' }}</label>
+      <input v-model="exploreSubject" :placeholder="isStudent ? 'e.g. Math' : 'e.g. Web Dev'" />
+    </div>
+    <button @click="loadExplore">Apply Filter</button>
+  </div>
+
+  <!-- Results -->
+  <div class="row" style="margin-top:10px;">
+    <div v-for="p in exploreResults" :key="p._id" class="card" style="flex:1; min-width:260px;">
+      <div class="row" style="gap:10px; align-items:center">
+        <img
+          v-if="p.photoUrl || p.profilePicture?.url || p.avatar?.url"
+          :src="p.photoUrl || p.profilePicture?.url || p.avatar?.url"
+          alt="Profile"
+          style="width:52px; height:52px; border-radius:50%; object-fit:cover; border:1px solid #e2e8f0"
+        >
+        <div>
+          <div><b>{{ isStudent ? 'Volunteer' : 'Student' }}</b></div>
+          <div class="small">userId: {{ p.userId }}</div>
         </div>
       </div>
 
-      <hr />
-      <h2>Book Session (as Student)</h2>
-      <p class="small">Enter a volunteer's userId → load availability → click a slot to request.</p>
-      <div class="row">
-        <div style="flex:2"><label>Volunteer UserId</label><input v-model="bookVolunteerId" placeholder="paste volunteer userId" /></div>
-        <button @click="loadVolunteerAvailability">Load Availability</button>
+      <!-- Student exploring volunteers -->
+      <div v-if="isStudent">
+        <div class="small" style="margin-top:6px">
+          <span v-if="p.location">{{ p.location }}</span>
+          <span v-if="p.timezone"> • {{ p.timezone }}</span>
+          <span v-if="p.hourlyRate !== undefined"> • ₹{{ p.hourlyRate }}/hr</span>
+        </div>
+        <div>Subjects: {{ (p.subjects||[]).join(", ") }}</div>
+        <div v-if="(p.specialties||[]).length" class="small">Specialties: {{ p.specialties.join(", ") }}</div>
+        <div>Bio: {{ p.bio || '-' }}</div>
+        <div class="row" style="margin-top:8px">
+          <button v-if="user && user._id !== p.userId" @click="startChatWith(p.userId)">Message</button>
+          <button v-if="user && !isFollowingId(p.userId) && user._id !== p.userId" @click="followUser(p.userId)">Follow</button>
+          <button v-if="user && isFollowingId(p.userId)" class="ghost" @click="unfollowById(p.userId)">Unfollow</button>
+        </div>
       </div>
-      <div v-if="volunteerAvail.length" class="card" style="margin-top:10px">
-        <div class="row">
-          <div class="small">Pick date:</div>
-          <button v-for="d in volunteerAvail.map(v => v.date)" :key="d" :class="['tab', bookDate===d ? 'active':'' ]" @click="onPickBookDate(d)">{{ d }}</button>
+
+      <!-- Volunteer exploring students -->
+      <div v-if="isVolunteer">
+        <div>Interests: {{ (p.interests||[]).join(", ") }}</div>
+        <div v-if="p.bio">Bio: {{ p.bio }}</div>
+        <div class="row" style="margin-top:8px">
+          <button @click="sendSessionRequestToStudent(p.userId)">Send Session Request</button>
+          <button class="ghost" @click="startChatWith(p.userId)">Message</button>
         </div>
-        <div class="row" style="margin-top:10px">
-          <button v-for="s in bookSlots" :key="s" class="tab" @click="bookSlotAsStudent(s)">{{ s }}</button>
-        </div>
-        <div class="small" v-if="!bookSlots.length">No slots for selected date.</div>
       </div>
     </div>
+  </div>
+
+  <!-- Booking section (only students) -->
+  <div v-if="isStudent">
+    <hr />
+    <h2>Book Session (as Student)</h2>
+    <p class="small">Enter a volunteer's userId → load availability → click a slot to request.</p>
+    <div class="row">
+      <div style="flex:2"><label>Volunteer UserId</label><input v-model="bookVolunteerId" placeholder="paste volunteer userId" /></div>
+      <button @click="loadVolunteerAvailability">Load Availability</button>
+    </div>
+    <div v-if="volunteerAvail.length" class="card" style="margin-top:10px">
+      <div class="row">
+        <div class="small">Pick date:</div>
+        <button v-for="d in volunteerAvail.map(v => v.date)" :key="d" :class="['tab', bookDate===d ? 'active':'' ]" @click="onPickBookDate(d)">{{ d }}</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button v-for="s in bookSlots" :key="s" class="tab" @click="bookSlotAsStudent(s)">{{ s }}</button>
+      </div>
+      <div class="small" v-if="!bookSlots.length">No slots for selected date.</div>
+    </div>
+  </div>
+</div>
+
+
+
+  <!-- Booking section (only students) -->
+  <div v-if="isStudent">
+    <hr />
+    <h2>Book Session (as Student)</h2>
+    <p class="small">Enter a volunteer's userId → load availability → click a slot to request.</p>
+    <div class="row">
+      <div style="flex:2"><label>Volunteer UserId</label><input v-model="bookVolunteerId" placeholder="paste volunteer userId" /></div>
+      <button @click="loadVolunteerAvailability">Load Availability</button>
+    </div>
+    <div v-if="volunteerAvail.length" class="card" style="margin-top:10px">
+      <div class="row">
+        <div class="small">Pick date:</div>
+        <button v-for="d in volunteerAvail.map(v => v.date)" :key="d" :class="['tab', bookDate===d ? 'active':'' ]" @click="onPickBookDate(d)">{{ d }}</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button v-for="s in bookSlots" :key="s" class="tab" @click="bookSlotAsStudent(s)">{{ s }}</button>
+      </div>
+      <div class="small" v-if="!bookSlots.length">No slots for selected date.</div>
+    </div>
+  </div>
+</div>
+
 
     <!-- STATS -->
     <div v-if="tab==='stats'" class="card">
@@ -535,10 +619,13 @@
           </div>
         </div>
       </div>
-
-    </div>
-  </div>
+    </div>  
 </template>
+
+
+  
+
+
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
@@ -575,11 +662,71 @@ const profileSubjects = ref('')
 const profileLanguages = ref('')
 const profileSpecialties = ref('')
 
-// explore
-const exploreSubject = ref('')
-const volunteers = ref([])
-const manualTargetId = ref('')
-const requestSubject = ref('')
+// ---------- student profile ----------
+const studentForm = reactive({
+  college: '',
+  course: '',
+  year: '',
+  interests: [],
+  bio: '',
+  photoUrl: ''
+})
+const studentRaw = ref('')
+const studentInterests = ref('')
+
+async function loadMyStudentProfile() {
+  if (!user.value) return
+  try {
+    const data = await api(`/students/${user.value._id}`, { method: 'GET' })
+    studentRaw.value = JSON.stringify(data, null, 2)
+    const profile = data || {}
+
+    studentForm.college    = profile.college || ''
+    studentForm.course     = profile.course || ''
+    studentForm.year       = profile.year || ''
+    studentForm.bio        = profile.bio || ''
+    studentForm.photoUrl   = profile.profilePicture?.url || ''
+    studentInterests.value = (profile.interests || []).join(', ')
+  } catch (e) { alert(e.message) }
+}
+
+async function saveStudentProfile() {
+  try {
+    const payload = {
+      college: studentForm.college,
+      course: studentForm.course,
+      year: studentForm.year,
+      bio: studentForm.bio,
+      interests: studentInterests.value.split(',').map(s => s.trim()).filter(Boolean),
+    }
+    const data = await api('/students/me', { method: 'PUT', body: JSON.stringify(payload) })
+    studentRaw.value = JSON.stringify(data, null, 2)
+    alert('Student profile saved')
+  } catch (e) { alert(e.message) }
+}
+
+const studentFile = ref(null)
+
+async function uploadStudentPhoto(evt) {
+  const file = evt.target.files?.[0]
+  if (!file) return alert("Select file first")
+
+  try {
+    const fd = new FormData()
+    fd.append("photo", file) // backend expects field name "photo"
+    const data = await api('/students/me/photo', { method: 'POST', body: fd })
+
+    studentForm.photoUrl = data.profilePicture?.url || ''
+    await loadMyStudentProfile()
+    alert("Photo uploaded!")
+  } catch (err) {
+    console.error("Upload failed:", err)
+    alert(err.message || "Upload failed")
+  } finally {
+    evt.target.value = '' // reset input
+  }
+}
+
 
 // sessions
 const myRequests = ref([])
@@ -621,6 +768,8 @@ const pendingUploads = ref([]) // [{url,name,mime,size}]
 const isUploading = ref(false)
 
 const isVolunteer = computed(() => user.value && user.value.role === 'volunteer')
+const isStudent   = computed(() => user.value && user.value.role === 'student')
+const isAdmin     = computed(() => user.value && user.value.role === 'admin')
 
 // ------- peer display for chat header -------
 const peer = computed(() => {
@@ -685,14 +834,16 @@ function logout() {
 }
 function switchTab(t) {
   tab.value = t
-  if (t === 'explore') { loadVolunteers(); loadNetworkIfAuthed() }
+  if (t === 'explore') { loadExplore(); loadNetworkIfAuthed() }
   if (t === 'sessions') loadMyRequests()
   if (t === 'notifications') loadNotifications()
   if (t === 'people') loadNetwork()
   if (t === 'volunteer' && isVolunteer.value) { loadMyProfile(); loadDayAvailability(); loadMyBadges() }
+  if (t === 'student' && isStudent.value) { loadMyStudentProfile() }   // 🔥 added
   if (t === 'stats') { statsVolunteerId.value = user.value ? user.value._id : ''; loadDashboard() }
   if (t === 'chats') { loadConversations() }
 }
+
 function formatDate(d) { try { return new Date(d).toLocaleDateString() } catch { return d } }
 
 // auth
@@ -777,13 +928,67 @@ async function uploadProfilePhoto(evt) {
 }
 
 // explore
-async function loadVolunteers() {
+const exploreSubject = ref('')
+const exploreResults = ref([])
+const exploreId = ref('')
+
+// filter by subject/interest
+async function loadExplore() {
   try {
-    const q = exploreSubject.value ? `?subject=${encodeURIComponent(exploreSubject.value)}` : ''
-    const data = await fetch(`${API}/volunteers${q}`).then(r => r.json())
-    volunteers.value = Array.isArray(data) ? data : []
-  } catch (e) { alert(e.message) }
+    let data
+    if (isStudent.value) {
+      const q = exploreSubject.value ? `?subject=${encodeURIComponent(exploreSubject.value)}` : ''
+      data = await fetch(`${API}/volunteers${q}`).then(r => r.json())
+    } else if (isVolunteer.value) {
+      const q = exploreSubject.value ? `?interest=${encodeURIComponent(exploreSubject.value)}` : ''
+      data = await fetch(`${API}/students/${exploreId.value}`).then(r => r.json())
+    }
+    exploreResults.value = Array.isArray(data) ? data : []
+  } catch (e) {
+    alert(e.message)
+  }
 }
+
+// search by userId
+async function loadExploreById() {
+  try {
+    if (!exploreId.value) return alert('Enter userId')
+
+    let data
+    if (isStudent.value) {
+      data = await fetch(`${API}/volunteers/${exploreId.value.trim()}`).then(r => r.json())
+    } else if (isVolunteer.value) {
+      data = await fetch(`${API}/students/${exploreId.value.trim()}`).then(r => r.json())
+    }
+
+    exploreResults.value = data && !data.message ? [data] : []
+  } catch (e) {
+    alert(e.message)
+  }
+}
+
+
+
+async function sendSessionRequestToStudent(studentId) {
+  try {
+    if (!user.value) return alert('Login first')
+    if (!studentId) return alert('Missing student ID')
+
+    const body = {
+      target: studentId,
+      subject: 'Offer to teach',
+      message: 'Hi, I’d like to help you with this subject!',
+      date: new Date().toISOString().split('T')[0],
+      time: '10:00'
+    }
+
+    const data = await api('/sessions/request', { method: 'POST', body: JSON.stringify(body) })
+    alert('Session request sent!')
+  } catch (e) {
+    alert(e.message)
+  }
+}
+
 
 // session request
 async function sendSessionRequest() {

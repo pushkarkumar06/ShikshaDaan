@@ -13,10 +13,10 @@ const router = Router();
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid((id || "").trim());
 
 /* =========================================================
-   ME (safe profile, badges recompute, my network)
+   ME (profile, badges, network)
    ========================================================= */
 
-// Get my profile (safe) including badges
+// Get my profile (safe, no password)
 router.get("/me", requireAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user._id).lean();
@@ -29,7 +29,7 @@ router.get("/me", requireAuth, async (req, res) => {
   }
 });
 
-// Me: recompute badges now (handy for testing)
+// Recompute my badges (volunteers only)
 router.post("/me/recompute-badges", requireAuth, async (req, res) => {
   try {
     if (req.user.role !== "volunteer") {
@@ -44,12 +44,12 @@ router.post("/me/recompute-badges", requireAuth, async (req, res) => {
   }
 });
 
-// Get my network (followers & following)
+// My network (followers & following)
 router.get("/me/network", requireAuth, async (req, res) => {
   try {
     const u = await User.findById(req.user._id)
-      .populate("followers", "name role")
-      .populate("following", "name role")
+      .populate("followers", "name role profilePicture")
+      .populate("following", "name role profilePicture")
       .lean();
     return res.json({
       followers: u?.followers || [],
@@ -62,10 +62,10 @@ router.get("/me/network", requireAuth, async (req, res) => {
 });
 
 /* =========================================================
-   PUBLIC (badges, stats, lists)
+   PUBLIC (badges, stats, dashboard)
    ========================================================= */
 
-// Public: get user's badges (by userId)
+// Get user badges (by userId)
 router.get("/:id/badges", async (req, res) => {
   try {
     const id = (req.params.id || "").trim();
@@ -80,7 +80,7 @@ router.get("/:id/badges", async (req, res) => {
   }
 });
 
-// Public stats for a volunteer (nice for profile)
+// Volunteer stats (public)
 router.get("/:id/stats", async (req, res) => {
   try {
     const id = (req.params.id || "").trim();
@@ -94,41 +94,35 @@ router.get("/:id/stats", async (req, res) => {
   }
 });
 
-// Dashboard summary for a volunteer (public)
+// Volunteer dashboard (public)
 router.get("/:id/dashboard", async (req, res) => {
   try {
     const id = (req.params.id || "").trim();
     if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
 
-    // core stats you already compute
-    const core = await computeVolunteerStats(id); // { sessionsCompleted, studentsHelped, avgRating, ratingsCount }
+    const core = await computeVolunteerStats(id);
 
-    // badges (from user doc)
     const userDoc = await User.findById(id, { badges: 1, name: 1, role: 1 }).lean();
     const badges = userDoc?.badges || [];
 
-    // subject breakdown (scheduled sessions grouped by subject)
     const subjectAgg = await SessionRequest.aggregate([
       { $match: { volunteer: new mongoose.Types.ObjectId(id), status: "scheduled" } },
       { $group: { _id: "$subject", count: { $sum: 1 } } },
       { $sort: { count: -1 } }
     ]);
 
-    // recent reviews (last 5)
     const recentReviews = await Review.find({ volunteer: id })
       .populate("author", "name role")
       .sort({ createdAt: -1 })
       .limit(5)
       .lean();
 
-    // recent scheduled sessions (last 5)
     const recentSessions = await SessionRequest.find({ volunteer: id, status: "scheduled" })
       .sort({ updatedAt: -1 })
       .limit(5)
       .lean();
 
-    // upcoming sessions (today or future, sorted soonest first)
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const today = new Date().toISOString().slice(0, 10);
     const upcoming = await SessionRequest.find({
       volunteer: id,
       status: "scheduled",
@@ -138,7 +132,6 @@ router.get("/:id/dashboard", async (req, res) => {
       .limit(5)
       .lean();
 
-    // include volunteer profile rating fields (in case you want exact numbers)
     const volDoc = await Volunteer.findOne({ userId: id }, { avgRating: 1, ratingsCount: 1 }).lean();
 
     return res.json({
@@ -157,7 +150,6 @@ router.get("/:id/dashboard", async (req, res) => {
         subject: s.subject,
         date: s.final?.date || s.proposed?.date,
         time: s.final?.time || s.proposed?.time,
-        target: s.target,  // student/admin id
         createdAt: s.createdAt,
         updatedAt: s.updatedAt
       })),
@@ -175,6 +167,9 @@ router.get("/:id/dashboard", async (req, res) => {
   }
 });
 
+/* =========================================================
+   NETWORK (followers / following)
+   ========================================================= */
 
 // Followers list
 router.get("/:id/followers", async (req, res) => {
@@ -182,7 +177,7 @@ router.get("/:id/followers", async (req, res) => {
     const id = (req.params.id || "").trim();
     if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
 
-    const u = await User.findById(id).populate("followers", "name role").lean();
+    const u = await User.findById(id).populate("followers", "name role profilePicture").lean();
     if (!u) return res.status(404).json({ message: "User not found" });
     return res.json(u.followers || []);
   } catch (err) {
@@ -197,7 +192,7 @@ router.get("/:id/following", async (req, res) => {
     const id = (req.params.id || "").trim();
     if (!isObjectId(id)) return res.status(400).json({ message: "Invalid id" });
 
-    const u = await User.findById(id).populate("following", "name role").lean();
+    const u = await User.findById(id).populate("following", "name role profilePicture").lean();
     if (!u) return res.status(404).json({ message: "User not found" });
     return res.json(u.following || []);
   } catch (err) {
@@ -210,7 +205,7 @@ router.get("/:id/following", async (req, res) => {
    ACTIONS (follow / unfollow)
    ========================================================= */
 
-// Follow (any role → any role)
+// Follow any user
 router.post("/:id/follow", requireAuth, async (req, res) => {
   try {
     const targetId = (req.params.id || "").trim();
@@ -235,14 +230,14 @@ router.post("/:id/follow", requireAuth, async (req, res) => {
       }),
     ]);
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, message: "Followed successfully" });
   } catch (err) {
     console.error("POST /users/:id/follow failed:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
 
-// Unfollow (DELETE same path)
+// Unfollow any user
 router.delete("/:id/follow", requireAuth, async (req, res) => {
   try {
     const targetId = (req.params.id || "").trim();
@@ -256,7 +251,7 @@ router.delete("/:id/follow", requireAuth, async (req, res) => {
       User.updateOne({ _id: targetId }, { $pull: { followers: me } }),
     ]);
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, message: "Unfollowed successfully" });
   } catch (err) {
     console.error("DELETE /users/:id/follow failed:", err);
     return res.status(500).json({ message: "Server error" });

@@ -1,4 +1,4 @@
-<template>
+<template> 
   <div class="app">
     <h1>ShikshaDaan – Student Test UI (Vue)</h1>
     <p class="subtitle">Quick test UI for student features. Real UI will come later 🚀</p>
@@ -54,8 +54,6 @@
         <p>📸 Current:</p>
         <img :src="studentProfile.profilePicture.url" style="max-width:120px;border-radius:8px;" />
       </div>
-
-      <pre>{{ studentProfile }}</pre>
     </section>
 
     <!-- Explore Volunteers -->
@@ -68,7 +66,10 @@
         <h3>{{ vol.user?.name || 'Volunteer' }}</h3>
         <p><b>Subjects:</b> {{ vol.subjects?.join(", ") }}</p>
         <p><b>Bio:</b> {{ vol.bio }}</p>
-        <button @click="followVolunteer(vol.userId)">Follow</button>
+
+        <button v-if="!isFollowing(vol.userId)" @click="followVolunteer(vol.userId)">Follow</button>
+        <button v-else @click="unfollowVolunteer(vol.userId)">Unfollow</button>
+
         <button @click="messageVolunteer(vol.userId)">Message</button>
       </div>
     </section>
@@ -78,10 +79,32 @@
       <h2>Book Session</h2>
       <form @submit.prevent="bookSession">
         <input v-model="session.volunteerId" placeholder="Volunteer UserId" />
+        <button type="button" @click="loadAvailability">Load Availability</button>
+
+        <!-- Availability display -->
+        <div v-if="availability.length">
+          <h3>Available Slots</h3>
+          <div v-for="day in availability" :key="day.date" class="avail-day">
+            <p><b>{{ day.date }}</b></p>
+            <div class="slot-list">
+              <button
+                v-for="slot in day.slots"
+                :key="slot"
+                type="button"
+                class="slot-btn"
+                :class="{ selected: session.date === day.date && session.slot === slot }"
+                @click="selectSlot(day.date, slot)"
+              >
+                {{ slot }}
+              </button>
+            </div>
+          </div>
+        </div>
+
         <input v-model="session.subject" placeholder="Subject" />
         <input v-model="session.message" placeholder="Message (optional)" />
-        <input v-model="session.date" placeholder="Date (YYYY-MM-DD)" />
-        <input v-model="session.slot" placeholder="Slot (e.g. 14:00-15:00)" />
+        <input v-model="session.date" placeholder="Date (YYYY-MM-DD)" readonly />
+        <input v-model="session.slot" placeholder="Slot" readonly />
         <button type="submit">Book</button>
       </form>
       <pre>{{ sessionResponse }}</pre>
@@ -107,6 +130,28 @@
         <p><b>Data:</b> {{ n.payload }}</p>
       </div>
     </section>
+
+    <!-- Network -->
+    <section v-if="currentTab === 'Network' && token" class="card">
+      <h2>My Network</h2>
+      <button @click="loadNetwork">Refresh Network</button>
+
+      <div class="network-section">
+        <h3>Followers</h3>
+        <div v-if="followers.length === 0">No followers yet</div>
+        <div v-for="f in followers" :key="f._id" class="req-card">
+          <p>{{ f.name }} ({{ f.role }})</p>
+        </div>
+      </div>
+
+      <div class="network-section">
+        <h3>Following</h3>
+        <div v-if="following.length === 0">Not following anyone</div>
+        <div v-for="f in following" :key="f._id" class="req-card">
+          <p>{{ f.name }} ({{ f.role }})</p>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -121,14 +166,12 @@ export default {
       token: null,
       user: null,
 
-      tabs: ["Auth", "Profile", "Explore", "Book", "Requests", "Notifications"],
+      tabs: ["Auth", "Profile", "Explore", "Book", "Requests", "Notifications", "Network"],
       currentTab: "Auth",
 
-      // Auth
       signupData: { name: "", email: "", password: "" },
       loginData: { email: "", password: "" },
 
-      // Profile
       profile: {
         college: "",
         course: "",
@@ -142,17 +185,18 @@ export default {
       studentProfile: null,
       selectedFile: null,
 
-      // Volunteers
       searchSubject: "",
       volunteers: [],
 
-      // Sessions
       session: { volunteerId: "", subject: "", message: "", date: "", slot: "" },
+      availability: [],
       sessionResponse: null,
       mySessions: [],
 
-      // Notifications
       notifications: [],
+
+      followers: [],
+      following: [],
     };
   },
   methods: {
@@ -171,10 +215,13 @@ export default {
         this.token = res.data.token;
         this.user = res.data.user;
         axios.defaults.headers.common["Authorization"] = `Bearer ${this.token}`;
-        alert("Login success");
 
-        // ✅ fetch student profile immediately after login
+        localStorage.setItem("token", this.token);
+        localStorage.setItem("user", JSON.stringify(this.user));
+
+        alert("Login success");
         await this.loadProfile();
+        await this.loadNetwork();
       } catch (err) {
         alert("Login failed");
         console.error(err);
@@ -184,8 +231,6 @@ export default {
       try {
         const res = await axios.get(`${this.api}/students/${this.user._id}`);
         this.studentProfile = res.data;
-
-        // pre-fill the form fields
         Object.assign(this.profile, {
           college: res.data.college || "",
           course: res.data.course || "",
@@ -198,6 +243,17 @@ export default {
         });
       } catch (err) {
         console.error("Failed to load profile", err);
+      }
+    },
+    async loadNetwork() {
+      try {
+        const res = await axios.get(`${this.api}/users/me/network`);
+        this.followers = res.data.followers;
+        this.following = res.data.following;
+        this.studentProfile = this.studentProfile || {};
+        this.studentProfile.following = res.data.following.map(f => f._id);
+      } catch (err) {
+        console.error("Failed to load network", err);
       }
     },
     async updateProfile() {
@@ -220,11 +276,13 @@ export default {
       this.selectedFile = e.target.files[0];
     },
     async uploadPhoto() {
-      if (!this.selectedFile) return alert("Select file first");
       try {
+        if (!this.selectedFile) return alert("Select file first");
         const formData = new FormData();
         formData.append("photo", this.selectedFile);
-        const res = await axios.post(`${this.api}/students/me/photo`, formData, { headers: { "Content-Type": "multipart/form-data" } });
+        const res = await axios.post(`${this.api}/students/me/photo`, formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
         this.studentProfile = res.data;
         this.selectedFile = null;
         alert("Photo uploaded!");
@@ -242,19 +300,65 @@ export default {
         alert("Failed to fetch volunteers");
       }
     },
-    followVolunteer(id) {
-      alert(`Follow volunteer ${id} (backend to be connected)`);
+    async followVolunteer(id) {
+      try {
+        await axios.post(`${this.api}/users/${id}/follow`);
+        if (!this.studentProfile.following.includes(id)) {
+          this.studentProfile.following.push(id);
+        }
+        await this.loadNetwork();
+        alert("Followed successfully!");
+      } catch (err) {
+        console.error(err);
+        alert("Failed to follow");
+      }
+    },
+    async unfollowVolunteer(id) {
+      try {
+        await axios.delete(`${this.api}/users/${id}/follow`);
+        this.studentProfile.following = this.studentProfile.following.filter(uid => uid !== id);
+        await this.loadNetwork();
+        alert("Unfollowed successfully!");
+      } catch (err) {
+        console.error(err);
+        alert("Failed to unfollow");
+      }
+    },
+    isFollowing(id) {
+      return this.studentProfile?.following?.includes(id);
     },
     messageVolunteer(id) {
       alert(`Message volunteer ${id} (chat UI later)`);
     },
-    async bookSession() {
+    async loadAvailability() {
+      if (!this.session.volunteerId) return alert("Enter Volunteer ID first");
       try {
-        const res = await axios.post(`${this.api}/sessions/request`, this.session);
-        this.sessionResponse = res.data;
+        const res = await axios.get(`${this.api}/volunteers/${this.session.volunteerId}`);
+        console.log("Volunteer data:", res.data);
+        this.availability = res.data.profile?.availability || [];
+        if (!this.availability.length) {
+          alert("No availability found for this volunteer");
+        }
       } catch (err) {
         console.error(err);
-        alert("Booking failed");
+        alert("Failed to load availability");
+      }
+    },
+    selectSlot(date, slot) {
+      this.session.date = date;
+      this.session.slot = slot;
+    },
+    async bookSession() {
+      try {
+        if (!this.session.date || !this.session.slot) {
+          return alert("Please select a slot first");
+        }
+        const res = await axios.post(`${this.api}/sessions/request`, this.session);
+        this.sessionResponse = res.data;
+        alert("Session request sent!");
+      } catch (err) {
+        console.error(err);
+        alert(err.response?.data?.message || "Booking failed");
       }
     },
     async fetchMySessions() {
@@ -278,78 +382,44 @@ export default {
     logout() {
       this.token = null;
       this.user = null;
+      this.studentProfile = null;
+      this.followers = [];
+      this.following = [];
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
       axios.defaults.headers.common["Authorization"] = "";
       this.currentTab = "Auth";
       alert("Logged out");
     },
   },
+  mounted() {
+    const savedToken = localStorage.getItem("token");
+    const savedUser = localStorage.getItem("user");
+    if (savedToken && savedUser) {
+      this.token = savedToken;
+      this.user = JSON.parse(savedUser);
+      axios.defaults.headers.common["Authorization"] = `Bearer ${this.token}`;
+      this.loadProfile();
+      this.loadNetwork();
+    }
+  },
 };
 </script>
 
 <style>
-body {
-  background: #111;
-  color: #fff;
-  font-family: Arial, sans-serif;
-}
-.app {
-  padding: 20px;
-  max-width: 800px;
-  margin: auto;
-}
-.subtitle {
-  color: #bbb;
-}
-.navbar {
-  margin: 20px 0;
-}
-.navbar button {
-  margin-right: 8px;
-  padding: 8px 14px;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  background: #333;
-  color: #fff;
-}
-.navbar button.active {
-  background: #2563eb;
-}
-.navbar .logout {
-  background: #e74c3c;
-  float: right;
-}
-.card {
-  background: #1e1e1e;
-  padding: 20px;
-  border-radius: 10px;
-  margin-bottom: 20px;
-}
-input {
-  display: block;
-  margin: 6px 0;
-  padding: 8px;
-  width: 100%;
-  border-radius: 6px;
-  border: 1px solid #444;
-  background: #222;
-  color: #fff;
-}
-button {
-  margin: 8px 0;
-  padding: 10px;
-  background: #2563eb;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  color: #fff;
-}
-.vol-card,
-.req-card,
-.noti-card {
-  background: #2a2a2a;
-  padding: 12px;
-  border-radius: 8px;
-  margin: 10px 0;
-}
+/* same CSS as before */
+body { background: #111; color: #fff; font-family: Arial, sans-serif; }
+.app { padding: 20px; max-width: 800px; margin: auto; }
+.subtitle { color: #bbb; }
+.navbar { margin: 20px 0; }
+.navbar button { margin-right: 8px; padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; background: #333; color: #fff; }
+.navbar button.active { background: #2563eb; }
+.navbar .logout { background: #e74c3c; float: right; }
+.card { background: #1e1e1e; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+input { display: block; margin: 6px 0; padding: 8px; width: 100%; border-radius: 6px; border: 1px solid #444; background: #222; color: #fff; }
+button { margin: 8px 0; padding: 10px; background: #2563eb; border: none; border-radius: 6px; cursor: pointer; color: #fff; }
+.vol-card, .req-card, .noti-card, .network-section { background: #2a2a2a; padding: 12px; border-radius: 8px; margin: 10px 0; }
+.slot-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.slot-btn { background: #333; color: #fff; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+.slot-btn.selected { background: #2563eb; }
 </style>

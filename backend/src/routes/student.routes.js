@@ -37,11 +37,7 @@ router.get("/:userId", async (req, res) => {
       return res.status(400).json({ message: "Invalid userId" });
     }
 
-    const profile = await Student.findOne({ userId })
-      .populate("followers", "name profilePicture")
-      .populate("following", "name profilePicture")
-      .lean();
-
+    const profile = await Student.findOne({ userId }).lean();
     if (!profile) return res.status(404).json({ message: "Student profile not found" });
 
     res.json(profile);
@@ -84,6 +80,24 @@ router.put("/me", requireAuth, requireRole("student"), async (req, res) => {
   }
 });
 
+// GET /api/students?interest=XYZ
+router.get("/", async (req, res) => {
+  try {
+    const { interest } = req.query;
+    let query = {};
+    if (interest) {
+      query.interests = { $regex: new RegExp(interest, "i") }; // case insensitive match
+    }
+
+    const students = await Student.find(query).select("-__v").lean();
+    res.json(students);
+  } catch (err) {
+    console.error("GET /students failed:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
 /**
  * POST /api/students/me/photo
  * Upload avatar
@@ -95,12 +109,14 @@ router.post(
   upload.single("photo"),
   async (req, res) => {
     try {
-      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
 
       let profile = await Student.findOne({ userId: req.user._id });
-      if (!profile) profile = await Student.create({ userId: req.user._id });
+      if (!profile) profile = new Student({ userId: req.user._id });
 
-      // delete old avatar if exists
+      // delete old avatar
       if (profile.profilePicture?.publicId) {
         try {
           await cloudinary.uploader.destroy(profile.profilePicture.publicId);
@@ -109,17 +125,28 @@ router.post(
         }
       }
 
-      // upload new avatar
+      // upload new
       const result = await uploadToCloudinary(req.file.buffer);
-      profile.profilePicture = { url: result.secure_url, publicId: result.public_id };
+      profile.profilePicture = {
+        url: result.secure_url,
+        publicId: result.public_id,
+      };
       await profile.save();
 
-      res.json(profile);
+      res.json(profile.toObject());
     } catch (err) {
       console.error("POST /students/me/photo failed:", err);
-      res.status(500).json({ message: "Server error" });
+      // 🔥 include real error
+      res.status(500).json({
+        message: "Server error",
+        error: err.message,
+        stack: err.stack,
+      });
     }
   }
 );
+
+
+
 
 export default router;
