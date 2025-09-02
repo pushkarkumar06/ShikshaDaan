@@ -228,11 +228,13 @@
     </div>
 
 
-    <div v-if="tab==='student'" class="card">
+
+<div v-if="tab==='student'" class="card">
   <h2>Student Profile</h2>
   <p class="small" v-if="!isStudent">Login as a <b>student</b> to edit profile.</p>
 
   <div v-if="isStudent">
+    <!-- Profile Section -->
     <div class="row" style="align-items:flex-start; gap:16px">
       <!-- Avatar -->
       <div class="card" style="min-width:180px; text-align:center">
@@ -278,9 +280,51 @@
       <div class="small">Current profile (raw)</div>
       <pre>{{ studentRaw }}</pre>
     </div>
+
+    <!-- Book Session Section -->
+    <hr />
+
+    <h2>Book Session (as Student)</h2>
+    <p class="small">Enter a volunteer's userId → load availability → click a slot to request.</p>
+    <div class="row">
+      <div style="flex:2">
+        <label>Volunteer UserId</label>
+        <input v-model="bookVolunteerId" placeholder="paste volunteer userId" />
+      </div>
+      <button @click="loadVolunteerAvailability">Load Availability</button>
+    </div>
+    <div v-if="volunteerAvail.length" class="card" style="margin-top:10px">
+      <div class="row">
+        <div class="small">Pick date:</div>
+        <button
+          v-for="d in volunteerAvail.map(v => v.date)"
+          :key="d"
+          :class="['tab', bookDate===d ? 'active':'' ]"
+          @click="onPickBookDate(d)"
+        >{{ d }}</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button 
+          v-for="s in bookSlots" 
+          :key="s" 
+          :class="['tab', selectedSlot===s ? 'active' : '']"
+          @click="selectedSlot = s"
+        >
+          {{ s }}
+        </button>
+      </div>
+      <!-- Show message + Book button only if slot selected -->
+      <div v-if="selectedSlot" style="margin-top:12px">
+        <label>Message to volunteer</label>
+        <input v-model="bookingMessage" placeholder="Write a message (optional)" />
+        <div class="row" style="margin-top:8px">
+          <button @click="bookSlotAsStudent">Book Session</button>
+        </div>
+      </div>
+      <div class="small" v-if="!bookSlots.length">No slots for selected date.</div>
+    </div>
   </div>
 </div>
-
 
 
 <!-- EXPLORE -->
@@ -351,53 +395,7 @@
       </div>
     </div>
   </div>
-
-  <!-- Booking section (only students) -->
-  <div v-if="isStudent">
-    <hr />
-    <h2>Book Session (as Student)</h2>
-    <p class="small">Enter a volunteer's userId → load availability → click a slot to request.</p>
-    <div class="row">
-      <div style="flex:2"><label>Volunteer UserId</label><input v-model="bookVolunteerId" placeholder="paste volunteer userId" /></div>
-      <button @click="loadVolunteerAvailability">Load Availability</button>
-    </div>
-    <div v-if="volunteerAvail.length" class="card" style="margin-top:10px">
-      <div class="row">
-        <div class="small">Pick date:</div>
-        <button v-for="d in volunteerAvail.map(v => v.date)" :key="d" :class="['tab', bookDate===d ? 'active':'' ]" @click="onPickBookDate(d)">{{ d }}</button>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button v-for="s in bookSlots" :key="s" class="tab" @click="bookSlotAsStudent(s)">{{ s }}</button>
-      </div>
-      <div class="small" v-if="!bookSlots.length">No slots for selected date.</div>
-    </div>
-  </div>
 </div>
-
-
-
-  <!-- Booking section (only students) -->
-  <div v-if="isStudent">
-    <hr />
-    <h2>Book Session (as Student)</h2>
-    <p class="small">Enter a volunteer's userId → load availability → click a slot to request.</p>
-    <div class="row">
-      <div style="flex:2"><label>Volunteer UserId</label><input v-model="bookVolunteerId" placeholder="paste volunteer userId" /></div>
-      <button @click="loadVolunteerAvailability">Load Availability</button>
-    </div>
-    <div v-if="volunteerAvail.length" class="card" style="margin-top:10px">
-      <div class="row">
-        <div class="small">Pick date:</div>
-        <button v-for="d in volunteerAvail.map(v => v.date)" :key="d" :class="['tab', bookDate===d ? 'active':'' ]" @click="onPickBookDate(d)">{{ d }}</button>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button v-for="s in bookSlots" :key="s" class="tab" @click="bookSlotAsStudent(s)">{{ s }}</button>
-      </div>
-      <div class="small" v-if="!bookSlots.length">No slots for selected date.</div>
-    </div>
-  </div>
-</div>
-
 
     <!-- STATS -->
     <div v-if="tab==='stats'" class="card">
@@ -620,10 +618,16 @@
         </div>
       </div>
     </div>  
+    </div>
 </template>
 
 
   
+
+
+
+
+
 
 
 
@@ -941,13 +945,14 @@ async function loadExplore() {
       data = await fetch(`${API}/volunteers${q}`).then(r => r.json())
     } else if (isVolunteer.value) {
       const q = exploreSubject.value ? `?interest=${encodeURIComponent(exploreSubject.value)}` : ''
-      data = await fetch(`${API}/students/${exploreId.value}`).then(r => r.json())
+      data = await fetch(`${API}/students${q}`).then(r => r.json())
     }
     exploreResults.value = Array.isArray(data) ? data : []
   } catch (e) {
     alert(e.message)
   }
 }
+
 
 // search by userId
 async function loadExploreById() {
@@ -1088,6 +1093,9 @@ const bookVolunteerId = ref('')
 const bookDate = ref('')
 const bookSlots = ref([])
 const volunteerAvail = ref([])
+const selectedSlot = ref('')
+const bookingMessage = ref('')
+
 async function loadVolunteerAvailability() {
   if (!bookVolunteerId.value) return alert('Enter volunteer userId')
   const data = await fetch(`${API}/volunteers/${bookVolunteerId.value.trim()}/availability`).then(r=>r.json())
@@ -1099,15 +1107,37 @@ function onPickBookDate(d) {
   bookDate.value = d
   bookSlots.value = volunteerAvail.value.find(x => x.date === d)?.slots || []
 }
-async function bookSlotAsStudent(slot) {
+
+// Replace your old bookSlotAsStudent function with this:
+// ...existing code...
+
+async function bookSlotAsStudent() {
   if (!user.value) return alert('Login first')
-  if (user.value.role !== 'student' && user.value.role !== 'admin') return alert('Only student/admin can book this way')
-  if (!bookVolunteerId.value || !bookDate.value) return alert('Pick volunteer and date')
-  const body = { volunteerId: bookVolunteerId.value.trim(), subject: 'Selected Slot', message: 'Booking via availability', date: bookDate.value, slot }
-  const data = await api('/sessions/request-to-volunteer', { method: 'POST', body: JSON.stringify(body) })
-  lastResponse.value = JSON.stringify(data, null, 2)
-  alert('Request sent to volunteer!')
+  if (user.value.role !== 'student' && user.value.role !== 'admin') return alert('Only student/admin can book')
+  if (!bookVolunteerId.value || !bookDate.value || !selectedSlot.value) 
+    return alert('Pick volunteer, date, and slot')
+
+  try {
+    const body = {
+      volunteerId: bookVolunteerId.value.trim(),
+      subject: 'Session Booking',
+      message: bookingMessage.value || 'I’d like to book this slot',
+      date: bookDate.value,
+      slot: selectedSlot.value
+    }
+    const data = await api('/sessions/request', { method: 'POST', body: JSON.stringify(body) })
+    lastResponse.value = JSON.stringify(data, null, 2)
+    alert('Request sent! Volunteer will be notified.')
+
+    // reset after success
+    selectedSlot.value = ''
+    bookingMessage.value = ''
+  } catch (err) {
+    alert(err.message || 'Failed to send request')
+  }
 }
+
+// ...existing code...
 
 // people
 function buildFollowingSet() { followingSet.value = new Set((following.value || []).map(p => String(p._id))) }
