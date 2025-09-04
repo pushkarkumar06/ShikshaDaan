@@ -24,7 +24,11 @@
         <button class="ghost" @click="switchTab('explore')">Explore</button>
         <button class="ghost" @click="switchTab('stats')">Stats</button>
         <button class="ghost" @click="switchTab('sessions')">My Requests</button>
-        <button class="ghost" @click="switchTab('notifications')">Notifications</button>
+        <div style="position:relative; display:inline-block;">
+  <button class="ghost" @click="switchTab('notifications')">Notifications</button>
+  <span v-if="notifUnread > 0"
+        style="position:absolute; top:-4px; right:-4px; width:10px; height:10px; background:#e11d48; border-radius:50%; display:inline-block;"></span>
+</div>
         <button class="ghost" @click="switchTab('review')">Post Review</button>
         <button class="ghost" @click="switchTab('people')">People</button>
 
@@ -61,7 +65,10 @@
       <div class="tab" :class="{active: tab==='explore'}" @click="switchTab('explore')">Explore</div>
       <div class="tab" :class="{active: tab==='stats'}" @click="switchTab('stats')">Stats</div>
       <div class="tab" :class="{active: tab==='sessions'}" @click="switchTab('sessions')">Requests</div>
-      <div class="tab" :class="{active: tab==='notifications'}" @click="switchTab('notifications')">Notifications</div>
+      <div class="tab" :class="{active: tab==='notifications'}" @click="switchTab('notifications')">
+  Notifications
+  <span v-if="notifUnread > 0" class="badge">{{ notifUnread }}</span>
+</div>
       <div class="tab" :class="{active: tab==='review'}" @click="switchTab('review')">Review</div>
       <div class="tab" :class="{active: tab==='people'}" @click="switchTab('people')">People</div>
       <div class="tab" :class="{active: tab==='chats'}" @click="switchTab('chats')">
@@ -450,37 +457,62 @@
     </div>
 
     <!-- REQUESTS -->
-    <div v-if="tab==='sessions'" class="card">
-      <h2>My Session Requests</h2>
-      <div class="row"><button @click="loadMyRequests">Reload</button></div>
-      <div v-for="r in myRequests" :key="r._id" class="card">
-        <div>Subject: <b>{{ r.subject }}</b></div>
-        <div>Status: {{ r.status }}</div>
-        <div v-if="r.proposed">Proposed: {{ r.proposed.date }} {{ r.proposed.time }}</div>
-        <div v-if="r.final">Final: {{ r.final.date }} {{ r.final.time }} — <a :href="r.final.zoomLink" target="_blank">Join</a></div>
-        <div class="row" style="margin-top:10px; gap:6px">
-          <button @click="openChatForSession(r)">Open Chat</button>
-          <div v-if="user && String(r.target) === String(user._id) && r.status !== 'scheduled'" class="row">
-            <input v-model="acceptDate" placeholder="YYYY-MM-DD" />
-            <input v-model="acceptTime" placeholder="HH:mm" />
-            <button @click="acceptRequest(r._id)">Accept & Schedule</button>
-          </div>
-        </div>
+<div v-if="tab==='sessions'" class="card">
+  <h2>My Session Requests</h2>
+  <div class="row"><button @click="loadMyRequests">Reload</button></div>
+  <div v-for="r in myRequests" :key="r._id" class="card">
+    <div>Subject: <b>{{ r.subject }}</b></div>
+    <div>From: <b>{{ r.requestedBy?.name || 'Unknown' }}</b> ({{ r.requestedBy?.role }})</div>
+    <div>Message: {{ r.message || '-' }}</div>
+    <div>Status: {{ r.status }}</div>
+    <div v-if="r.proposed">Proposed: {{ r.proposed.date }} {{ r.proposed.time }}</div>
+    <div v-if="r.final">Final: {{ r.final.date }} {{ r.final.time }} — <a :href="r.final.zoomLink" target="_blank">Join</a></div>
+    <div class="row" style="margin-top:10px; gap:6px">
+      <button @click="openChatForSession(r)">Open Chat</button>
+      <!-- Accept / Reject (only the receiver sees these while pending) -->
+      <button v-if="canAccept(r)" @click="respondToRequest(r, 'accepted')">Accept</button>
+      <button v-if="canReject(r)" class="danger" @click="respondToRequest(r, 'rejected')">Reject</button>
+      <!-- Volunteer scheduling UI (keep as-is if needed) -->
+      <div
+        v-if="user && user.role === 'volunteer' && String(r.volunteer?._id||r.volunteer)===String(user._id) && r.status !== 'scheduled'"
+        class="row"
+        style="gap:6px"
+      >
+        <input v-model="acceptDate" placeholder="YYYY-MM-DD" />
+        <input v-model="acceptTime" placeholder="HH:mm" />
+        <button @click="acceptRequest(r._id)">Accept & Schedule</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div v-if="tab==='notifications'" class="card">
+  <h2>Notifications</h2>
+  <div class="row"><button @click="loadNotifications">Reload</button></div>
+  <div v-for="n in notifications" :key="n._id" class="card">
+    <div><b>{{ n.type }}</b> from <b>{{ n.payload?.actorName || '-' }}</b></div>
+    <div class="small">Subject: {{ n.payload?.subject || '-' }}</div>
+    <div class="small">Message: {{ n.payload?.message || '-' }}</div>
+
+    <div v-if="n.type==='session_request'" class="small">
+      Proposed: {{ n.payload?.proposedDate }} {{ n.payload?.proposedTime }}
     </div>
 
-    <!-- NOTIFICATIONS -->
-    <div v-if="tab==='notifications'" class="card">
-      <h2>Notifications</h2>
-      <div class="row"><button @click="loadNotifications">Reload</button></div>
-      <div v-for="n in notifications" :key="n._id" class="card">
-        <div>Type: <b>{{ n.type }}</b> <span v-if="!n.read" class="badge">new</span></div>
-        <div class="small">payload: {{ n.payload }}</div>
-        <div class="row" style="margin-top:6px">
-          <button v-if="!n.read" @click="markNotifRead(n._id)">Mark read</button>
-        </div>
-      </div>
+    <div v-if="n.type==='session_update'" class="small">
+      Status: <b>{{ n.payload?.status }}</b>
+      <template v-if="n.payload?.finalDate || n.payload?.finalTime">
+        • Final: {{ n.payload?.finalDate }} {{ n.payload?.finalTime }}
+        <a v-if="n.payload?.zoomLink" :href="n.payload.zoomLink" target="_blank">Join</a>
+      </template>
     </div>
+
+    <div class="row" style="margin-top:6px">
+      <button v-if="!n.read" @click="markNotifRead(n._id)">Mark read</button>
+    </div>
+  </div>
+</div>
+
+
 
     <!-- REVIEW -->
     <div v-if="tab==='review'" class="card">
@@ -740,6 +772,9 @@ const acceptTime = ref('10:30')
 // notifications
 const notifications = ref([])
 
+// === Unread notifications count (for red dot/badge) ===
+const unreadNotifs = computed(() => (notifications.value || []).filter(n => !n.read).length);
+
 // reviews
 const reviewForm = reactive({ volunteerId: '', rating: 5, comment: '' })
 
@@ -806,6 +841,58 @@ function volPhoto(v) {
     || ''
 }
 
+// === Unread notifications badge ===
+const notifUnread = computed(() =>
+  (notifications.value || []).filter(n => !n.read).length
+)
+
+// === Helpers to know if current user is the RECEIVER of a request ===
+function amReceiver(r) {
+  if (!user.value) return false
+  const me = String(user.value._id)
+  const isPending = r.status === 'pending'
+  if (user.value.role === 'volunteer') {
+    return isPending && String(r.volunteer?._id || r.volunteer) === me
+  }
+  if (user.value.role === 'student') {
+    return isPending && String(r.student?._id || r.student) === me
+  }
+  return false
+}
+const canAccept = (r) => amReceiver(r)
+const canReject = (r) => amReceiver(r)
+
+// === Accept / Reject action ===
+// NOTE: volunteers use existing /sessions/:id/status.
+//       students call /sessions/:id/respond (add this small endpoint on backend).
+async function respondToRequest(r, action) {
+  try {
+    if (!['accepted','rejected'].includes(action)) return
+    if (!user.value) return alert('Login first')
+
+    if (user.value.role === 'volunteer') {
+      await api(`/sessions/${r._id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: action })
+      })
+    } else if (user.value.role === 'student') {
+      // backend tiny endpoint that lets the receiver student accept/reject
+      await api(`/sessions/${r._id}/respond`, {
+        method: 'PUT',
+        body: JSON.stringify({ action })   // 'accepted' | 'rejected'
+      })
+    }
+
+    await loadMyRequests()
+    await loadNotifications()
+    alert(`Request ${action}.`)
+  } catch (e) {
+    alert(e.message || 'Failed to update request')
+  }
+}
+
+
+
 // --------- api (supports FormData) ---------
 async function api(path, options = {}) {
   const url = `${API}${path}`
@@ -836,14 +923,22 @@ function logout() {
   localStorage.removeItem('user')
   if (socket.value) socket.value.disconnect()
 }
+
 function switchTab(t) {
   tab.value = t
   if (t === 'explore') { loadExplore(); loadNetworkIfAuthed() }
   if (t === 'sessions') loadMyRequests()
-  if (t === 'notifications') loadNotifications()
+  if (t === 'notifications') {
+    // auto mark all read so the red dot clears immediately
+    (async () => {
+      await loadNotifications();
+      try { await api('/notifications/read-all', { method: 'POST' }); } catch {}
+      await loadNotifications(); // refresh counts
+    })();
+  }
   if (t === 'people') loadNetwork()
   if (t === 'volunteer' && isVolunteer.value) { loadMyProfile(); loadDayAvailability(); loadMyBadges() }
-  if (t === 'student' && isStudent.value) { loadMyStudentProfile() }   // 🔥 added
+  if (t === 'student' && isStudent.value) { loadMyStudentProfile() }
   if (t === 'stats') { statsVolunteerId.value = user.value ? user.value._id : ''; loadDashboard() }
   if (t === 'chats') { loadConversations() }
 }
@@ -974,26 +1069,30 @@ async function loadExploreById() {
 
 
 
+// 🔹 Volunteer sends request to a student
 async function sendSessionRequestToStudent(studentId) {
   try {
     if (!user.value) return alert('Login first')
     if (!studentId) return alert('Missing student ID')
 
     const body = {
-      target: studentId,
+      target: studentId,  // backend expects "target"
       subject: 'Offer to teach',
-      message: 'Hi, I’d like to help you with this subject!',
+      message: requestMessage.value || 'Hi, I’d like to help you with this subject!',
       date: new Date().toISOString().split('T')[0],
       time: '10:00'
     }
 
-    const data = await api('/sessions/request', { method: 'POST', body: JSON.stringify(body) })
+    const data = await api('/sessions/request', { 
+      method: 'POST', 
+      body: JSON.stringify(body) 
+    })
+    lastResponse.value = JSON.stringify(data, null, 2)
     alert('Session request sent!')
   } catch (e) {
     alert(e.message)
   }
 }
-
 
 // session request
 async function sendSessionRequest() {
@@ -1095,6 +1194,7 @@ const bookSlots = ref([])
 const volunteerAvail = ref([])
 const selectedSlot = ref('')
 const bookingMessage = ref('')
+const requestMessage = ref('')
 
 async function loadVolunteerAvailability() {
   if (!bookVolunteerId.value) return alert('Enter volunteer userId')
@@ -1113,19 +1213,25 @@ function onPickBookDate(d) {
 
 async function bookSlotAsStudent() {
   if (!user.value) return alert('Login first')
-  if (user.value.role !== 'student' && user.value.role !== 'admin') return alert('Only student/admin can book')
+  if (user.value.role !== 'student' && user.value.role !== 'admin') 
+    return alert('Only student/admin can book')
   if (!bookVolunteerId.value || !bookDate.value || !selectedSlot.value) 
     return alert('Pick volunteer, date, and slot')
 
   try {
-    const body = {
-      volunteerId: bookVolunteerId.value.trim(),
-      subject: 'Session Booking',
-      message: bookingMessage.value || 'I’d like to book this slot',
-      date: bookDate.value,
-      slot: selectedSlot.value
+    const body = { 
+      target: bookVolunteerId.value.trim(),   // backend expects "target"
+      subject: 'Selected Slot', 
+      message: bookingMessage.value || 'Booking via availability', // custom message
+      date: bookDate.value, 
+      time: selectedSlot.value                 // ✅ use selectedSlot.value
     }
-    const data = await api('/sessions/request', { method: 'POST', body: JSON.stringify(body) })
+
+    const data = await api('/sessions/request', { 
+      method: 'POST', 
+      body: JSON.stringify(body) 
+    })
+
     lastResponse.value = JSON.stringify(data, null, 2)
     alert('Request sent! Volunteer will be notified.')
 
@@ -1136,6 +1242,7 @@ async function bookSlotAsStudent() {
     alert(err.message || 'Failed to send request')
   }
 }
+
 
 // ...existing code...
 

@@ -4,7 +4,7 @@ import mongoose from "mongoose";
 const sessionRequestSchema = new mongoose.Schema(
   {
     // Who initiated the request (student or volunteer)
-    createdBy: {
+    requestedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
