@@ -161,6 +161,7 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
  * - rejected: status='rejected'
  * - scheduled (volunteer only): requires date & time, checks availability, sets final, removes slot, zoom.
  */
+// Replace the existing PUT /:id/status handler with this
 router.put("/:id/status", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -229,17 +230,22 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       }
 
       await sr.save();
-      await notify(otherPartyId, "session_update", {
-        requestId: sr._id,
-        status: sr.status,
-        // 👍 include these so the UI has data to show
-        subject: sr.subject,
-        message: sr.message || "",
-        proposedDate: sr.proposed?.date || null,
-        proposedTime: sr.proposed?.time || null,
-        finalDate: sr.final?.date || null,
-        finalTime: sr.final?.time || null,
-        by: { id: req.user._id, name: req.user.name, role: req.user.role },
+      // notify the OTHER participant (not the one who acted)
+      await Notification.create({
+        user: otherPartyId,
+        type: "session_update",
+        payload: {
+          requestId: sr._id,
+          status: sr.status,
+          actorId: req.user._id,
+          actorName: req.user.name,
+          actorRole: req.user.role,
+          subject: sr.subject,
+          message: sr.message || '',
+          finalDate: sr.final?.date || null,
+          finalTime: sr.final?.time || null,
+          zoomLink: sr.final?.zoomLink || null
+        }
       });
 
       const populated = await SessionRequest.findById(sr._id)
