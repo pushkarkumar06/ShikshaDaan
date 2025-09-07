@@ -14,6 +14,14 @@ const isOID = (v) => mongoose.Types.ObjectId.isValid(v);
 const toOID = (v) => new mongoose.Types.ObjectId(v);
 const sameId = (a, b) => String(a) === String(b);
 
+function getUserFromReq(req) {
+  // fallback-friendly extraction of id, role, name
+  const id = req.user?._id || req.userId || req.user?.id || (req.user ? String(req.user) : undefined);
+  const role = req.user?.role || req.userRole || req.role || undefined;
+  const name = req.user?.name || req.userName || null;
+  return { id, role, name };
+}
+
 async function notify(userId, type, payload = {}) {
   try {
     await Notification.create({ user: userId, type, payload });
@@ -31,8 +39,9 @@ async function notify(userId, type, payload = {}) {
 router.post("/request", requireAuth, async (req, res) => {
   try {
     const { target, subject, message = "", date, time } = req.body;
+    const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
-    if (!["student", "volunteer"].includes(req.user.role)) {
+    if (!["student", "volunteer"].includes(userRole)) {
       return res
         .status(403)
         .json({ message: "Only students or volunteers can send requests" });
@@ -45,12 +54,12 @@ router.post("/request", requireAuth, async (req, res) => {
     }
 
     let studentId, volunteerId, notifyUserId;
-    if (req.user.role === "student") {
-      studentId = req.user._id;
+    if (userRole === "student") {
+      studentId = userId;
       volunteerId = toOID(target);
       notifyUserId = volunteerId;
     } else {
-      volunteerId = req.user._id;
+      volunteerId = userId;
       studentId = toOID(target);
       notifyUserId = studentId;
     }
@@ -58,7 +67,7 @@ router.post("/request", requireAuth, async (req, res) => {
     const doc = await SessionRequest.create({
       student: studentId,
       volunteer: volunteerId,
-      requestedBy: req.user._id,
+      requestedBy: userId,
       subject,
       message,
       proposed: date && time ? { date, time } : undefined,
@@ -70,16 +79,15 @@ router.post("/request", requireAuth, async (req, res) => {
       type: "session_request",
       payload: {
         requestId: doc._id,
-        actorId: req.user._id,            // who performed the action
-        actorName: req.user.name,
-        actorRole: req.user.role,
+        actorId: userId,            // who performed the action
+        actorName: userName,
+        actorRole: userRole,
         subject,
         message,
         proposedDate: date || null,
         proposedTime: time || null
       },
     });
-
 
     const populated = await SessionRequest.findById(doc._id)
       .populate("student", "name role")
@@ -100,6 +108,7 @@ router.post("/request", requireAuth, async (req, res) => {
 router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) => {
   try {
     const { studentId, subject, message = "", date, time } = req.body;
+    const { id: userId, name: userName } = getUserFromReq(req);
 
     if (!studentId || !subject) {
       return res.status(400).json({ message: "studentId and subject are required" });
@@ -109,9 +118,9 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
     }
 
     const doc = await SessionRequest.create({
-      requestedBy: req.user._id,
+      requestedBy: userId,
       student: toOID(studentId),
-      volunteer: req.user._id,
+      volunteer: userId,
       subject,
       message,
       proposed: date && time ? { date, time } : undefined,
@@ -123,8 +132,8 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
       type: "session_request",
       payload: {
         requestId: doc._id,
-        actorId: req.user._id,
-        actorName: req.user.name,
+        actorId: userId,
+        actorName: userName,
         actorRole: "volunteer",
         subject,
         message,
@@ -147,25 +156,12 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
 
 /**
  * ACCEPT / REJECT / SCHEDULE / COMPLETE / CANCEL
- * - Accept/Reject: allowed to the opposite party of requestedBy (both roles)
- * - Schedule: only volunteer (uses volunteer availability)
- *
- * body:
- *   { status: 'accepted' | 'rejected' | 'scheduled' | 'completed' | 'cancelled', date?, time? }
- *
- * Behaviour:
- * - accepted:
- *     * If there is a proposed date/time AND the acceptor is the volunteer,
- *       we auto-schedule -> final = proposed, remove slot, create zoom, status='scheduled'
- *     * Else just mark 'accepted'.
- * - rejected: status='rejected'
- * - scheduled (volunteer only): requires date & time, checks availability, sets final, removes slot, zoom.
  */
-// Replace the existing PUT /:id/status handler with this
 router.put("/:id/status", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, date, time } = req.body;
+    const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
     if (!isOID(id)) {
       return res.status(400).json({ message: "Invalid session id" });
@@ -179,14 +175,14 @@ router.put("/:id/status", requireAuth, async (req, res) => {
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
     // Only a participant can change it
-    if (!sameId(sr.student, req.user._id) && !sameId(sr.volunteer, req.user._id)) {
+    if (!sameId(sr.student, userId) && !sameId(sr.volunteer, userId)) {
       return res.status(403).json({ message: "Not allowed" });
     }
 
-    const actorIsVolunteer = req.user.role === "volunteer";
-    const otherPartyId = sameId(sr.student, req.user._id) ? sr.volunteer : sr.student;
+    const actorIsVolunteer = userRole === "volunteer";
+    const otherPartyId = sameId(sr.student, userId) ? sr.volunteer : sr.student;
 
-    // ACCEPT / REJECT only when pending or accepted (to support re-accept flow)
+    // ACCEPT / REJECT
     if (status === "accepted" || status === "rejected") {
       if (sr.status !== "pending" && sr.status !== "accepted") {
         return res.status(400).json({ message: `Cannot ${status} from status ${sr.status}` });
@@ -196,33 +192,45 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         sr.status = "rejected";
       } else {
         // ACCEPTED
-        // If volunteer is accepting AND there is a proposed time, auto-schedule
         if (
           actorIsVolunteer &&
           sr.proposed?.date &&
           sr.proposed?.time
         ) {
-          const vol = await Volunteer.findOne({ userId: req.user._id });
-          if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
-
-          const d = (vol.availability || []).find((a) => a.date === sr.proposed.date);
-          if (!d || !d.slots.includes(sr.proposed.time)) {
-            // If slot was taken, just mark accepted; frontend can re-schedule manually
+          const vol = await Volunteer.findOne({ userId }); // keeping existing search key
+          if (!vol) {
             sr.status = "accepted";
           } else {
-            const zoomLink = await createZoomMeetingStub({
-              topic: sr.subject,
-              date: sr.proposed.date,
-              time: sr.proposed.time,
-            });
-            sr.final = { date: sr.proposed.date, time: sr.proposed.time, zoomLink };
-            sr.status = "scheduled";
+            const d = (vol.availability || []).find((a) => a.date === sr.proposed.date);
+            if (!d || !d.slots.includes(sr.proposed.time)) {
+              sr.status = "accepted";
+            } else {
+              let zoomLink = null;
+              try {
+                const zoomRes = await createZoomMeetingStub({
+                  topic: sr.subject,
+                  date: sr.proposed.date,
+                  time: sr.proposed.time,
+                });
+                zoomLink = zoomRes?.join_url || zoomRes?.joinUrl || zoomRes?.url || zoomRes?.link || null;
+              } catch (zErr) {
+                console.error("Zoom creation failed (accept auto-schedule):", zErr?.message || zErr);
+                zoomLink = null;
+              }
 
-            // remove booked slot
-            d.slots = d.slots.filter((s) => s !== sr.proposed.time);
-            await vol.save();
+              sr.final = { date: sr.proposed.date, time: sr.proposed.time, zoomLink };
+              sr.status = "scheduled";
 
-            await awardBadgesForVolunteer(req.user._id);
+              // remove booked slot
+              d.slots = d.slots.filter((s) => s !== sr.proposed.time);
+              await vol.save();
+
+              try {
+                await awardBadgesForVolunteer(userId);
+              } catch (badgeErr) {
+                console.warn("awardBadgesForVolunteer failed:", badgeErr?.message || badgeErr);
+              }
+            }
           }
         } else {
           sr.status = "accepted";
@@ -230,16 +238,16 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       }
 
       await sr.save();
-      // notify the OTHER participant (not the one who acted)
+
       await Notification.create({
         user: otherPartyId,
         type: "session_update",
         payload: {
           requestId: sr._id,
           status: sr.status,
-          actorId: req.user._id,
-          actorName: req.user.name,
-          actorRole: req.user.role,
+          actorId: userId,
+          actorName: userName,
+          actorRole: userRole,
           subject: sr.subject,
           message: sr.message || '',
           finalDate: sr.final?.date || null,
@@ -265,7 +273,7 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         return res.status(400).json({ message: "date and time required to schedule" });
       }
 
-      const vol = await Volunteer.findOne({ userId: req.user._id });
+      const vol = await Volunteer.findOne({ userId });
       if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
 
       const day = (vol.availability || []).find((a) => a.date === date);
@@ -273,25 +281,37 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         return res.status(400).json({ message: "Selected slot not available" });
       }
 
-      const zoomLink = await createZoomMeetingStub({ topic: sr.subject, date, time });
+      let zoomLink = null;
+      try {
+        const zoomRes = await createZoomMeetingStub({ topic: sr.subject, date, time });
+        zoomLink = zoomRes?.join_url || zoomRes?.joinUrl || zoomRes?.url || zoomRes?.link || null;
+      } catch (zErr) {
+        console.error("Zoom creation failed (manual schedule):", zErr?.message || zErr);
+        zoomLink = null;
+      }
+
       sr.final = { date, time, zoomLink };
       sr.status = "scheduled";
 
       day.slots = day.slots.filter((s) => s !== time);
       await vol.save();
 
-      await awardBadgesForVolunteer(req.user._id);
+      try {
+        await awardBadgesForVolunteer(userId);
+      } catch (badgeErr) {
+        console.warn("awardBadgesForVolunteer failed:", badgeErr?.message || badgeErr);
+      }
       await sr.save();
 
       await Notification.create({
-        user: sr.student,                    // ← student gets the update
+        user: sr.student,
         type: "session_update",
         payload: {
           requestId: sr._id,
           status: sr.status,
-          actorId: req.user._id,             // volunteer who acted
-          actorName: req.user.name,
-          actorRole: req.user.role,
+          actorId: userId,
+          actorName: userName,
+          actorRole: userRole,
           subject: sr.subject,
           message: sr.message || "",
           proposedDate: sr.proposed?.date || null,
@@ -318,7 +338,7 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       await notify(otherPartyId, "session_update", {
         requestId: sr._id,
         status: sr.status,
-        by: { id: req.user._id, name: req.user.name, role: req.user.role },
+        by: { id: userId, name: userName, role: userRole },
       });
 
       const populated = await SessionRequest.findById(sr._id)
@@ -329,7 +349,7 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       return res.json(populated);
     }
 
-    // fallback (should never hit)
+    // fallback
     return res.status(400).json({ message: "Unhandled status" });
   } catch (err) {
     console.error("PUT /sessions/:id/status failed:", err);
@@ -337,51 +357,137 @@ router.put("/:id/status", requireAuth, async (req, res) => {
   }
 });
 
-
-// sessions.routes.js
+// sessions.routes.js - student respond endpoint (replace the old one)
 router.put('/:id/respond', requireAuth, async (req, res) => {
   try {
-    const { id } = req.params
-    const { action } = req.body // 'accepted' | 'rejected'
+    const { id } = req.params;
+    const { action } = req.body; // 'accepted' | 'rejected'
+    const { id: userId, name: userName } = getUserFromReq(req);
+
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid or missing session id' });
+    }
     if (!['accepted', 'rejected'].includes(action)) {
-      return res.status(400).json({ message: 'Invalid action' })
+      return res.status(400).json({ message: 'Invalid action' });
     }
 
-    const sr = await SessionRequest.findById(id)
-    if (!sr) return res.status(404).json({ message: 'Session not found' })
-    // only the student (receiver) may use this
-    if (String(sr.student) !== String(req.user._id)) {
-      return res.status(403).json({ message: 'Not allowed' })
+    // populate minimal fields so we can compare owner ids and notify correctly
+    const sr = await SessionRequest.findById(id).populate('volunteer student requestedBy');
+    if (!sr) return res.status(404).json({ message: 'Session not found' });
+
+    // derive canonical student id (handles populated object or raw ObjectId)
+    const srStudentId = sr.student && (sr.student._id ? String(sr.student._id) : String(sr.student));
+    const srVolunteerId = sr.volunteer && (sr.volunteer._id ? String(sr.volunteer._id) : String(sr.volunteer));
+
+    // Only the student (the receiver) may accept/reject here
+    if (!srStudentId || String(userId) !== srStudentId) {
+      return res.status(403).json({ message: 'Not allowed' });
     }
+
     if (sr.status !== 'pending') {
-      return res.status(400).json({ message: 'Request no longer pending' })
+      return res.status(400).json({ message: 'Request no longer pending' });
     }
 
-    sr.status = action
-    await sr.save()
+    // REJECT flow
+    if (action === 'rejected') {
+      sr.status = 'rejected';
+      sr.rejectedAt = new Date();
+      await sr.save();
 
-    await Notification.create({
-      user: sr.volunteer,                           // ← volunteer receives
-      type: "session_update",
-      payload: {
-        requestId: sr._id,
-        actorId: req.user._id,
-        actorName: req.user.name,
-        actorRole: "student",
-        action: sr.status,
-        subject: sr.subject,
-        proposed: sr.proposed || null,
-        final: sr.final || null
-      },
-    });
+      await Notification.create({
+        user: srVolunteerId,
+        type: "session_update",
+        payload: {
+          requestId: sr._id,
+          actorId: userId,
+          actorName: userName,
+          actorRole: "student",
+          action: sr.status,                    // keeps existing field
+          status: sr.status,                    // also provide "status" for frontend
+          subject: sr.subject,
+          message: sr.message || '',
+          proposed: sr.proposed || null,
+          final: sr.final || null,
+          finalDate: sr.final?.date || null,    // convenient top-level fields used by UI
+          finalTime: sr.final?.time || null,
+          zoomLink: sr.final?.zoomLink || null
+        },
+      });
 
-    res.json(sr)
+      const populated = await SessionRequest.findById(sr._id)
+        .populate("student", "name role")
+        .populate("volunteer", "name role")
+        .populate("requestedBy", "name role");
+
+      return res.json(populated);
+    }
+
+    // ACCEPT flow
+    if (action === 'accepted') {
+      // If volunteer proposed a slot, try to reserve it and mark scheduled
+      if (sr.proposed?.date && sr.proposed?.time) {
+        const vol = await Volunteer.findOne({ userId: srVolunteerId });
+        let slotTaken = true;
+        if (vol) {
+          const day = (vol.availability || []).find(a => a.date === sr.proposed.date);
+          if (day && Array.isArray(day.slots) && day.slots.includes(sr.proposed.time)) {
+            day.slots = day.slots.filter(s => s !== sr.proposed.time);
+            await vol.save();
+            slotTaken = false;
+          }
+        }
+
+        if (!slotTaken) {
+          sr.final = { date: sr.proposed.date, time: sr.proposed.time, zoomLink: null };
+          sr.status = 'scheduled';
+          sr.acceptedAt = new Date();
+          try { await awardBadgesForVolunteer(String(srVolunteerId)); } catch (e) { console.warn('awardBadgesForVolunteer failed', e?.message || e); }
+        } else {
+          // fallback to accepted
+          sr.status = 'accepted';
+          sr.acceptedAt = new Date();
+        }
+      } else {
+        sr.status = 'accepted';
+        sr.acceptedAt = new Date();
+      }
+
+      await sr.save();
+
+      await Notification.create({
+        user: srVolunteerId,
+        type: "session_update",
+        payload: {
+          requestId: sr._id,
+          actorId: userId,
+          actorName: userName,
+          actorRole: "student",
+          action: sr.status,                    // keeps existing field
+          status: sr.status,                    // also provide "status" for frontend
+          subject: sr.subject,
+          message: sr.message || '',
+          proposed: sr.proposed || null,
+          final: sr.final || null,
+          finalDate: sr.final?.date || null,    // convenient top-level fields used by UI
+          finalTime: sr.final?.time || null,
+          zoomLink: sr.final?.zoomLink || null
+        },
+      });
+
+      const populated = await SessionRequest.findById(sr._id)
+        .populate("student", "name role")
+        .populate("volunteer", "name role")
+        .populate("requestedBy", "name role");
+
+      return res.json(populated);
+    }
+
+    return res.status(400).json({ message: 'Unhandled action' });
   } catch (err) {
-    console.error('PUT /sessions/:id/respond failed:', err)
-    res.status(500).json({ message: 'Server error' })
+    console.error('PUT /sessions/:id/respond failed:', err);
+    return res.status(500).json({ message: 'Server error', error: err.message });
   }
-})
-
+});
 
 
 /**
@@ -389,7 +495,7 @@ router.put('/:id/respond', requireAuth, async (req, res) => {
  */
 router.get("/mine", requireAuth, async (req, res) => {
   try {
-    const uid = req.user._id;
+    const { id: uid } = getUserFromReq(req);
     const requests = await SessionRequest.find({
       $or: [{ volunteer: uid }, { student: uid }, { requestedBy: uid }],
     })
@@ -412,12 +518,13 @@ router.post("/:id/feedback", requireAuth, requireRole("student"), async (req, re
   try {
     const { id } = req.params;
     const { rating, comment } = req.body;
+    const { id: userId } = getUserFromReq(req);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid session id" });
     }
 
-    const sr = await SessionRequest.findOne({ _id: id, student: req.user._id });
+    const sr = await SessionRequest.findOne({ _id: id, student: userId });
     if (!sr) return res.status(404).json({ message: "Session not found" });
     if (sr.status !== "completed") {
       return res.status(400).json({ message: "Feedback allowed only after completion" });

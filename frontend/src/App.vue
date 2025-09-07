@@ -34,7 +34,7 @@
 
         <div style="position:relative; display:inline-block;">
           <button class="ghost" @click="switchTab('chats')">Chats</button>
-          <span v-if="totalUnread > 0" style="position:absolute; top:-4px; right:-4px; width:10px; height:10px; background:#e11d48; border-radius:50%; display:inline-block;"></span>
+          <span v-if="notifTotalUnread > 0" style="position:absolute; top:-4px; right:-4px; width:10px; height:10px; background:#e11d48; border-radius:50%; display:inline-block;"></span>
         </div>
 
         <button v-if="user" class="danger" @click="logout">Logout</button>
@@ -73,7 +73,7 @@
       <div class="tab" :class="{active: tab==='people'}" @click="switchTab('people')">People</div>
       <div class="tab" :class="{active: tab==='chats'}" @click="switchTab('chats')">
         Chats
-        <span v-if="totalUnread > 0" class="badge">{{ totalUnread }}</span>
+        <span v-if="notifTotalUnread > 0" class="badge">{{ notifTotalUnread }}</span>
       </div>
     </div>
 
@@ -402,7 +402,62 @@
       </div>
     </div>
   </div>
+
+  <!-- Volunteer quick send (only visible for volunteers) -->
+  <!-- Volunteer quick send: choose from YOUR availability -->
+  <div v-if="isVolunteer" class="card" style="margin-top:12px">
+    <h3 style="margin:0 0 8px 0">Send session request to student</h3>
+
+    <div class="row" style="align-items:flex-start; gap:12px">
+      <div style="flex:2">
+        <label>Student UserId</label>
+        <input v-model="exploreStudentId" placeholder="paste student userId" />
+      </div>
+
+      <div style="flex:3">
+        <label>Message</label>
+        <textarea v-model="exploreStudentMessage" placeholder="Write a short message (optional)"></textarea>
+      </div>
+
+      <div style="display:flex; align-items:flex-end; gap:8px">
+        <button @click="loadMyVolunteerAvailability">Load my availability</button>
+        <button @click="sendSessionRequestToStudentFromInput">Send Request</button>
+      </div>
+    </div>
+
+    <!-- Availability chooser (shows after load) -->
+    <div v-if="exploreVolunteerAvail.length" style="margin-top:12px">
+      <div class="small">Pick date (from your availability):</div>
+      <div class="row" style="margin-top:8px">
+        <button
+          v-for="d in exploreVolunteerAvail.map(x => x.date)"
+          :key="d"
+          :class="['tab', exploreStudentDate===d ? 'active' : '']"
+          @click="onPickExploreDate(d)"
+        >
+          {{ d }}
+        </button>
+      </div>
+
+      <div v-if="exploreBookSlots.length" style="margin-top:8px">
+        <div class="small">Pick time slot:</div>
+        <div class="row" style="margin-top:6px; gap:8px; flex-wrap:wrap">
+          <button
+            v-for="s in exploreBookSlots"
+            :key="s"
+            :class="['tab', exploreStudentTime===s ? 'active' : '']"
+            @click="exploreStudentTime = s"
+          >
+            {{ s }}
+          </button>
+        </div>
+      </div>
+
+      <div v-else class="small" style="margin-top:8px">Select a date to see slots.</div>
+    </div>
+  </div>
 </div>
+
 
     <!-- STATS -->
     <div v-if="tab==='stats'" class="card">
@@ -468,10 +523,9 @@
     <div v-if="r.proposed">Proposed: {{ r.proposed.date }} {{ r.proposed.time }}</div>
     <div v-if="r.final">Final: {{ r.final.date }} {{ r.final.time }} — <a :href="r.final.zoomLink" target="_blank">Join</a></div>
     <div class="row" style="margin-top:10px; gap:6px">
+      <button v-if="user && (String(user._id) === String(r.volunteer._id) || String(user._id) === String(r.student._id)) && r.status==='pending'" @click="acceptSession(r)">Accept</button>
+      <button v-if="user && (String(user._id) === String(r.volunteer._id) || String(user._id) === String(r.student._id)) && r.status==='pending'" class="ghost" @click="respondToRequest(r._id, 'rejected')">Reject</button>
       <button @click="openChatForSession(r)">Open Chat</button>
-      <!-- Accept / Reject (only the receiver sees these while pending) -->
-      <button v-if="canAccept(r)" @click="respondToRequest(r, 'accepted')">Accept</button>
-      <button v-if="canReject(r)" class="danger" @click="respondToRequest(r, 'rejected')">Reject</button>
       <!-- Volunteer scheduling UI (keep as-is if needed) -->
       <div
         v-if="user && user.role === 'volunteer' && String(r.volunteer?._id||r.volunteer)===String(user._id) && r.status !== 'scheduled'"
@@ -486,11 +540,19 @@
   </div>
 </div>
 
+
 <div v-if="tab==='notifications'" class="card">
   <h2>Notifications</h2>
   <div class="row"><button @click="loadNotifications">Reload</button></div>
   <div v-for="n in notifications" :key="n._id" class="card">
-    <div><b>{{ n.type }}</b> from <b>{{ n.payload?.actorName || '-' }}</b></div>
+    <div class="small">
+      Type: <b>{{ n.type }}</b>
+      <span v-if="!n.read" class="badge">new</span>
+    </div>
+    <div class="small">
+      From: <b>{{ n.payload?.actorName || n.payload?.senderName || 'Unknown' }}</b>
+      <span class="small">({{ n.payload?.actorRole || '' }})</span>
+    </div>
     <div class="small">Subject: {{ n.payload?.subject || '-' }}</div>
     <div class="small">Message: {{ n.payload?.message || '-' }}</div>
 
@@ -511,8 +573,6 @@
     </div>
   </div>
 </div>
-
-
 
     <!-- REVIEW -->
     <div v-if="tab==='review'" class="card">
@@ -664,6 +724,7 @@
 
 
 <script setup>
+import axios from "axios";
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { io } from 'socket.io-client'
 
@@ -675,6 +736,13 @@ const token = ref(localStorage.getItem('token') || '')
 const user = ref(JSON.parse(localStorage.getItem('user') || 'null'))
 const tab = ref('auth')
 const lastResponse = ref('')
+const exploreStudentId = ref('')         // volunteer -> student search box
+const exploreStudentMessage = ref('')    // message volunteer types
+const exploreStudentDate = ref('')    // yyyy-mm-dd or leave empty
+const exploreStudentTime = ref('')    // e.g. 10:00 or empty
+const exploreVolunteerAvail = ref([])  // for storing loaded availability
+const exploreBookSlots = ref([])       // for slots of the selected date
+const notifTotalUnread = ref(0)      
 
 // forms
 const signupForm = reactive({ name: '', email: '', password: '', role: 'volunteer' })
@@ -862,35 +930,63 @@ function amReceiver(r) {
 const canAccept = (r) => amReceiver(r)
 const canReject = (r) => amReceiver(r)
 
-// === Accept / Reject action ===
-// NOTE: volunteers use existing /sessions/:id/status.
-//       students call /sessions/:id/respond (add this small endpoint on backend).
-async function respondToRequest(r, action) {
+// === Accept / Reject action (replace any existing respondToRequest)
+async function respondToRequest(rOrId, action) {
   try {
-    if (!['accepted','rejected'].includes(action)) return
-    if (!user.value) return alert('Login first')
+    if (!['accepted','rejected'].includes(action)) return;
+    if (!user.value) return alert('Login first');
 
-    if (user.value.role === 'volunteer') {
-      await api(`/sessions/${r._id}/status`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: action })
-      })
-    } else if (user.value.role === 'student') {
-      // backend tiny endpoint that lets the receiver student accept/reject
-      await api(`/sessions/${r._id}/respond`, {
-        method: 'PUT',
-        body: JSON.stringify({ action })   // 'accepted' | 'rejected'
-      })
+    // accept both shapes: object { _id } or plain id string
+    const requestId = typeof rOrId === 'string' ? rOrId : (rOrId && (rOrId._id || rOrId.id));
+    if (!requestId) {
+      console.error('respondToRequest: missing request id', rOrId);
+      return alert('Cannot perform action. Missing session id.');
     }
 
-    await loadMyRequests()
-    await loadNotifications()
-    alert(`Request ${action}.`)
+    if (user.value.role === 'volunteer') {
+      await api(`/sessions/${requestId}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: action })
+      });
+    } else if (user.value.role === 'student') {
+      // backend tiny endpoint that lets the receiver student accept/reject
+      await api(`/sessions/${requestId}/respond`, {
+        method: 'PUT',
+        body: JSON.stringify({ action })   // 'accepted' | 'rejected'
+      });
+    }
+
+    await loadMyRequests();
+    await loadNotifications();
+    alert(`Request ${action}.`);
   } catch (e) {
-    alert(e.message || 'Failed to update request')
+    console.error('respondToRequest error', e);
+    alert(e.message || 'Failed to update request');
   }
 }
 
+// acceptSession -> replaces any axios-based implementation
+async function acceptSession(session) {
+  console.log("session used for accept:", session);
+  const id = session?._id || session?.id;
+  if (!id) {
+    console.error("acceptSession: missing session id", session);
+    alert("Cannot accept. Session id missing.");
+    return;
+  }
+
+  try {
+    // reuse respondToRequest that uses api() and correct base URL + auth
+    await respondToRequest(id, 'accepted');
+
+    // refresh UI
+    await loadMyRequests();
+    await loadNotifications();
+  } catch (err) {
+    console.error("acceptSession error", err);
+    alert(err?.message || 'Accept failed');
+  }
+}
 
 
 // --------- api (supports FormData) ---------
@@ -1069,30 +1165,82 @@ async function loadExploreById() {
 
 
 
-// 🔹 Volunteer sends request to a student
-async function sendSessionRequestToStudent(studentId) {
+// Send session request from the volunteer quick send UI
+async function sendSessionRequestToStudentFromInput() {
+  if (!user.value) return alert('Login first');
+  if (user.value.role !== 'volunteer' && user.value.role !== 'admin') return alert('Only volunteers/admin can send requests from here.');
+  const studentId = (exploreStudentId.value || '').trim();
+  if (!studentId) return alert('Enter a student userId');
+
   try {
-    if (!user.value) return alert('Login first')
-    if (!studentId) return alert('Missing student ID')
-
+    // prefer selected slot (from exploreStudentDate/exploreStudentTime), else send nulls
     const body = {
-      target: studentId,  // backend expects "target"
+      target: studentId,
       subject: 'Offer to teach',
-      message: requestMessage.value || 'Hi, I’d like to help you with this subject!',
-      date: new Date().toISOString().split('T')[0],
-      time: '10:00'
-    }
-
-    const data = await api('/sessions/request', { 
-      method: 'POST', 
-      body: JSON.stringify(body) 
-    })
-    lastResponse.value = JSON.stringify(data, null, 2)
-    alert('Session request sent!')
-  } catch (e) {
-    alert(e.message)
+      message: exploreStudentMessage.value || 'Hi, I’d like to help you with this subject!',
+      date: exploreStudentDate.value || null,
+      time: exploreStudentTime.value || null
+    };
+    const data = await api('/sessions/request', { method: 'POST', body: JSON.stringify(body) });
+    lastResponse.value = JSON.stringify(data, null, 2);
+    alert('Session request sent!');
+    // reset inputs
+    exploreStudentId.value = '';
+    exploreStudentMessage.value = '';
+    exploreStudentDate.value = '';
+    exploreStudentTime.value = '';
+    exploreVolunteerAvail.value = [];
+    exploreBookSlots.value = [];
+    // refresh lists
+    if (loadNotifications) await loadNotifications();
+    if (loadMyRequests) await loadMyRequests();
+  } catch (err) {
+    console.error(err);
+    alert(err?.message || 'Failed to send request');
   }
 }
+
+// load volunteer's own saved availability (calls /volunteers/:id/availability)
+async function loadMyVolunteerAvailability() {
+  if (!user.value) return alert('Login first');
+  if (!user.value._id) return alert('Missing user id in local state');
+
+  try {
+    // use the same endpoint shape you used elsewhere
+    const data = await api(`/volunteers/${user.value._id}/availability`, { method: 'GET' });
+    exploreVolunteerAvail.value = Array.isArray(data) ? data : [];
+
+    // auto-select first date and slots if present
+    exploreStudentDate.value = exploreVolunteerAvail.value[0]?.date || '';
+    exploreBookSlots.value = exploreVolunteerAvail.value[0]?.slots ? [...exploreVolunteerAvail.value[0].slots] : [];
+    exploreStudentTime.value = exploreBookSlots.value[0] || '';
+  } catch (e) {
+    console.error('loadMyVolunteerAvailability failed', e);
+    alert(e.message || 'Failed to load availability');
+  }
+}
+
+// Used from student cards (keep or replace)
+async function sendSessionRequestToStudent(studentId, message = null) {
+  if (!user.value) return alert('Login first');
+  try {
+    const body = {
+      target: studentId,
+      subject: 'Offer to teach',
+      message: message || 'Hi, I’d like to help you with this subject!',
+      date: null,
+      time: null
+    };
+    await api('/sessions/request', { method: 'POST', body: JSON.stringify(body) });
+    alert('Session request sent!');
+    if (loadNotifications) await loadNotifications();
+    if (loadMyRequests) await loadMyRequests();
+  } catch (e) {
+    console.error(e);
+    alert(e.message || 'Failed to send request');
+  }
+}
+
 
 // session request
 async function sendSessionRequest() {
@@ -1129,8 +1277,12 @@ async function loadNotifications() {
   try {
     const data = await api('/notifications', { method: 'GET' })
     notifications.value = Array.isArray(data) ? data : []
-  } catch (e) { alert(e.message) }
+    totalUnread.value = (data || []).filter(n => !n.read).length
+  } catch (e) {
+    console.error(e)
+  }
 }
+
 async function markNotifRead(id) {
   try {
     await api(`/notifications/${id}/read`, { method: 'POST' })
