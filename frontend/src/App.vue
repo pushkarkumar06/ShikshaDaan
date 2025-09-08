@@ -75,6 +75,7 @@
         Chats
         <span v-if="notifTotalUnread > 0" class="badge">{{ notifTotalUnread }}</span>
       </div>
+      <div v-if="user && user.role === 'student'" class="tab" :class="{active: tab==='studentProgress'}" @click="switchTab('studentProgress')">My Progress</div>
     </div>
 
     <!-- AUTH -->
@@ -368,8 +369,13 @@
           alt="Profile"
           style="width:52px; height:52px; border-radius:50%; object-fit:cover; border:1px solid #e2e8f0"
         >
-        <div>
-          <div><b>{{ isStudent ? 'Volunteer' : 'Student' }}</b></div>
+        <div style="flex:1">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <a class="user-name clickable" @click.prevent="openProfile(p.userId, p.role || (isStudent ? 'volunteer' : 'student'))">
+              <b>{{ p.name || p.userId || (isStudent ? 'Volunteer' : 'Student') }}</b>
+            </a>
+            <span class="badge">{{ p.role || (isStudent ? 'volunteer' : 'student') }}</span>
+          </div>
           <div class="small">userId: {{ p.userId }}</div>
         </div>
       </div>
@@ -709,22 +715,110 @@
           </div>
         </div>
       </div>
-    </div>  
     </div>
+
+    <!-- STUDENT PROGRESS -->
+    <div v-if="tab==='studentProgress'" class="card">
+      <h2>My Learning Progress</h2>
+      <div class="row" style="gap:12px; flex-wrap:wrap">
+        <div class="card" style="min-width:180px">
+          <div class="small">Total sessions</div>
+          <div class="stat">{{ progress.totalSessions || 0 }}</div>
+        </div>
+        <div class="card" style="min-width:180px">
+          <div class="small">Completed sessions</div>
+          <div class="stat">{{ progress.completedSessions || 0 }}</div>
+        </div>
+        <div class="card" style="min-width:180px">
+          <div class="small">Hours learned</div>
+          <div class="stat">{{ progress.hoursLearned || 0 }}</div>
+        </div>
+        <div class="card" style="min-width:180px">
+          <div class="small">Weekly streak (days)</div>
+          <div class="stat">{{ progress.weeklyStreak || 0 }}</div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <h3>Average rating you gave</h3>
+        <div class="small">{{ progress.avgRating ? progress.avgRating.toFixed(2) + '/5' : 'No ratings yet' }}</div>
+      </div>
+
+      <div style="margin-top:12px">
+        <h3>Top subjects</h3>
+        <div v-if="(progress.subjects || []).length">
+          <div v-for="s in progress.subjects" :key="s.subject" class="row" style="justify-content:space-between">
+            <div>{{ s.subject }}</div><div class="small">{{ s.count }}</div>
+          </div>
+        </div>
+        <div v-else class="small">No subject data yet.</div>
+      </div>
+
+      <div style="margin-top:12px">
+        <h3>Upcoming sessions</h3>
+        <div v-if="(progress.scheduledSessions || []).length">
+          <div v-for="ss in progress.scheduledSessions" :key="ss._id" class="row" style="justify-content:space-between">
+            <div>{{ ss.subject }} — {{ ss.date }} {{ ss.time }}</div>
+            <div class="small">Volunteer: {{ ss.volunteer?.name || ss.volunteer }}</div>
+          </div>
+        </div>
+        <div v-else class="small">No upcoming sessions.</div>
+      </div>
+
+      <div style="margin-top:12px">
+        <h3>Badges</h3>
+        <div v-if="(progress.badges || []).length">
+          <span v-for="b in progress.badges" :key="b.key" class="badge">{{ b.label }}</span>
+        </div>
+        <div v-else class="small">No badges yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FULL PROFILE MODAL: paste before the final closing container tag in template -->
+  <div v-if="selectedProfile" class="profile-modal-backdrop" @click.self="closeProfile">
+    <div class="profile-modal card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; gap:12px; align-items:center;">
+          <img v-if="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url" 
+               :src="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url" 
+               alt="profile" 
+               style="width:64px;height:64px;border-radius:8px;object-fit:cover;border:1px solid #e2e8f0"/>
+          <div>
+            <div style="font-size:18px;font-weight:700">{{ selectedProfile.name || selectedProfile.userId }}</div>
+            <div class="small">{{ selectedProfile.role || selectedProfile.type }}</div>
+          </div>
+        </div>
+        <div><button class="ghost" @click="closeProfile">Close</button></div>
+      </div>
+
+      <hr />
+
+      <div style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:260px">
+          <div><b>About</b></div>
+          <div class="small">{{ selectedProfile.bio || '-' }}</div>
+          <div style="margin-top:8px"><b>Location / Timezone</b></div>
+          <div class="small">{{ selectedProfile.location || '-' }} {{ selectedProfile.timezone ? (' • ' + selectedProfile.timezone) : '' }}</div>
+          <div style="margin-top:8px"><b>Subjects / Interests</b></div>
+          <div class="small">{{ (selectedProfile.subjects || selectedProfile.interests || []).join(', ') || '-' }}</div>
+        </div>
+
+        <div style="flex:1; min-width:260px">
+          <div><b>Extras</b></div>
+          <div class="small">Hourly rate: {{ selectedProfile.hourlyRate !== undefined ? '₹' + selectedProfile.hourlyRate + '/hr' : '-' }}</div>
+          <div class="small">College / Course: {{ selectedProfile.college || selectedProfile.course || '-' }}</div>
+          <div style="margin-top:8px"><b>Raw (for quick debug)</b></div>
+          <pre style="max-height:160px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
-
-
-  
-
-
-
-
-
 
 
 
 <script setup>
-import axios from "axios";
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { io } from 'socket.io-client'
 
@@ -836,6 +930,11 @@ async function uploadStudentPhoto(evt) {
 const myRequests = ref([])
 const acceptDate = ref('2025-08-27')
 const acceptTime = ref('10:30')
+const manualTargetId = ref('')  // For session request form
+const requestSubject = ref('')  // For session request form
+
+// student progress
+const progress = ref({});
 
 // notifications
 const notifications = ref([])
@@ -867,7 +966,6 @@ const conversations = ref([])
 const activeConv = ref(null)
 const messages = ref([])
 const draft = ref('')
-const totalUnread = computed(() => conversations.value.reduce((sum, c) => sum + (c.unread || 0), 0))
 const scrollBox = ref(null)
 
 // attachments
@@ -992,14 +1090,29 @@ async function acceptSession(session) {
 // --------- api (supports FormData) ---------
 async function api(path, options = {}) {
   const url = `${API}${path}`
+
+  // read token directly from localStorage to avoid stale ref across tabs
+  const storedToken = localStorage.getItem('token') || ''
+
   const isFD = options.body instanceof FormData
   const headers = {
     ...(options.headers || {}),
-    ...(token.value ? { Authorization: `Bearer ${token.value}` } : {}),
+    ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}),
   }
   if (!isFD) headers['Content-Type'] = 'application/json'
 
   const res = await fetch(url, { ...options, headers, body: options.body })
+  // handle 401 explicitly so callers can react
+  if (res.status === 401) {
+    // clear local auth state to avoid repeated 401s and inform user
+    token.value = ''
+    user.value = null
+    localStorage.removeItem('token')
+    localStorage.removeItem('user')
+    // optional: switch to auth tab
+    tab.value = 'auth'
+    throw new Error('Unauthorized')
+  }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.message || 'Request failed')
   return data
@@ -1021,22 +1134,19 @@ function logout() {
 }
 
 function switchTab(t) {
-  tab.value = t
-  if (t === 'explore') { loadExplore(); loadNetworkIfAuthed() }
-  if (t === 'sessions') loadMyRequests()
-  if (t === 'notifications') {
-    // auto mark all read so the red dot clears immediately
-    (async () => {
-      await loadNotifications();
-      try { await api('/notifications/read-all', { method: 'POST' }); } catch {}
-      await loadNotifications(); // refresh counts
-    })();
-  }
-  if (t === 'people') loadNetwork()
-  if (t === 'volunteer' && isVolunteer.value) { loadMyProfile(); loadDayAvailability(); loadMyBadges() }
-  if (t === 'student' && isStudent.value) { loadMyStudentProfile() }
-  if (t === 'stats') { statsVolunteerId.value = user.value ? user.value._id : ''; loadDashboard() }
-  if (t === 'chats') { loadConversations() }
+  tab.value = t;
+  // eager loads for each tab
+  if (t === 'notifications') loadNotifications();
+  if (t === 'chats') loadConversations();
+  if (t === 'people') loadNetwork();
+  if (t === 'sessions') loadMyRequests();
+  if (t === 'stats') { statsVolunteerId.value = user.value ? user.value._id : ''; loadDashboard(); }
+  if (t === 'explore') loadExplore();
+  if (t === 'volunteer') { if (isVolunteer.value) { loadMyProfile(); loadDayAvailability(); loadMyBadges(); } }
+  if (t === 'student') { if (isStudent.value) loadMyStudentProfile(); }
+  if (t === 'studentProgress') loadMyProgress();
+  // keep viewport top
+  window.scrollTo(0, 0);
 }
 
 function formatDate(d) { try { return new Date(d).toLocaleDateString() } catch { return d } }
@@ -1127,16 +1237,116 @@ const exploreSubject = ref('')
 const exploreResults = ref([])
 const exploreId = ref('')
 
+// profile viewer state
+const selectedProfile = ref(null)
+const loadingProfile = ref(false)
+
+// open profile (role should be 'volunteer' or 'student' or read from server)
+async function openProfile(userId, roleHint = '') {
+  // First try to find user in exploreResults
+  const user = exploreResults.value.find(u => u.userId === userId || u._id === userId);
+  if (user) {
+    selectedProfile.value = user;
+    return;
+  }
+  
+  // If not found in exploreResults, fetch from API
+  if (!userId) return alert('Missing user id')
+  try {
+    loadingProfile.value = true;
+    
+    // Helper function to normalize profile data
+    const normalizeProfile = (data, role) => {
+      // Handle both { profile: {...} } and direct profile object responses
+      const profile = data.profile || data;
+      
+      // Map backend fields to frontend expected structure
+      return {
+        // Core fields
+        userId: profile.userId || userId,
+        role: role,
+        name: profile.name || '',
+        
+        // Profile picture - handle different field names
+        photoUrl: profile.photoUrl || profile.avatar?.url || profile.profilePicture?.url || '',
+        
+        // Bio and details
+        bio: profile.bio || profile.about || '',
+        
+        // Location - handle string or object format
+        location: typeof profile.location === 'string' 
+          ? profile.location 
+          : [profile.location?.city, profile.location?.state, profile.location?.country]
+              .filter(Boolean).join(', ') || '',
+        
+        // Timezone
+        timezone: profile.timezone || '',
+        
+        // Subjects/Interests - handle both arrays and comma-separated strings
+        subjects: Array.isArray(profile.subjects) 
+          ? profile.subjects 
+          : (profile.subjects || '').split(',').map(s => s.trim()).filter(Boolean),
+        
+        interests: Array.isArray(profile.interests) 
+          ? profile.interests 
+          : (profile.interests || '').split(',').map(s => s.trim()).filter(Boolean),
+        
+        // Additional fields with fallbacks
+        hourlyRate: profile.hourlyRate || null,
+        college: profile.college || profile.education?.[0]?.school || '',
+        course: profile.course || profile.education?.[0]?.degree || '',
+        
+        // Include all original fields for debugging
+        ...profile
+      };
+    };
+    
+    // use role hint to call the right endpoint
+    if ((roleHint || '').toLowerCase() === 'volunteer' || (roleHint || '').toLowerCase() === 'vol') {
+      const data = await api(`/volunteers/${userId}`, { method: 'GET' });
+      selectedProfile.value = normalizeProfile(data, 'volunteer');
+      tab.value = 'volunteer';
+    } else if ((roleHint || '').toLowerCase() === 'student' || (roleHint || '').toLowerCase() === 'stu') {
+      const data = await api(`/students/${userId}`, { method: 'GET' });
+      selectedProfile.value = normalizeProfile(data, 'student');
+      tab.value = 'student';
+    } else {
+      // not sure role — try both (volunteer then student)
+      try {
+        const data = await api(`/volunteers/${userId}`, { method: 'GET' });
+        selectedProfile.value = normalizeProfile(data, 'volunteer');
+        tab.value = 'volunteer';
+      } catch (e) {
+        const data = await api(`/students/${userId}`, { method: 'GET' });
+        selectedProfile.value = normalizeProfile(data, 'student');
+        tab.value = 'student';
+      }
+    }
+    
+    // Scroll to top of the page
+    window.scrollTo(0, 0);
+  } catch (e) {
+    console.error('openProfile failed', e);
+    alert(e.message || 'Failed to load profile');
+  } finally { 
+    loadingProfile.value = false; 
+  }
+}
+
+function closeProfile() {
+  selectedProfile.value = null
+}
+
 // filter by subject/interest
 async function loadExplore() {
   try {
     let data
     if (isStudent.value) {
       const q = exploreSubject.value ? `?subject=${encodeURIComponent(exploreSubject.value)}` : ''
-      data = await fetch(`${API}/volunteers${q}`).then(r => r.json())
+      data = await api(`/volunteers${q}`, { method: 'GET' })
     } else if (isVolunteer.value) {
       const q = exploreSubject.value ? `?interest=${encodeURIComponent(exploreSubject.value)}` : ''
-      data = await fetch(`${API}/students${q}`).then(r => r.json())
+      data = await api(`/students${q}`, { method: 'GET' })
     }
     exploreResults.value = Array.isArray(data) ? data : []
   } catch (e) {
@@ -1152,9 +1362,9 @@ async function loadExploreById() {
 
     let data
     if (isStudent.value) {
-      data = await fetch(`${API}/volunteers/${exploreId.value.trim()}`).then(r => r.json())
+      data = await api(`/volunteers/${exploreId.value.trim()}`, { method: 'GET' })
     } else if (isVolunteer.value) {
-      data = await fetch(`${API}/students/${exploreId.value.trim()}`).then(r => r.json())
+      data = await api(`/students/${exploreId.value.trim()}`, { method: 'GET' })
     }
 
     exploreResults.value = data && !data.message ? [data] : []
@@ -1276,10 +1486,10 @@ async function acceptRequest(requestId) {
 async function loadNotifications() {
   try {
     const data = await api('/notifications', { method: 'GET' })
-    notifications.value = Array.isArray(data) ? data : []
-    totalUnread.value = (data || []).filter(n => !n.read).length
+    notifications.value = Array.isArray(data) ? data : [];
+    notifTotalUnread.value = (data || []).filter(n => !n.read).length;
   } catch (e) {
-    console.error(e)
+    console.error(e);
   }
 }
 
@@ -1324,7 +1534,7 @@ const slotGrid = [
 const daySlots = ref([])
 async function loadDayAvailability() {
   if (!user.value) return
-  const data = await fetch(`${API}/volunteers/${user.value._id}/availability?from=${availDate.value}&to=${availDate.value}`).then(r=>r.json())
+  const data = await api(`/volunteers/${user.value._id}/availability?from=${availDate.value}&to=${availDate.value}`, { method: 'GET' })
   const day = Array.isArray(data) ? data.find(d => d.date === availDate.value) : null
   daySlots.value = day ? [...day.slots] : []
 }
@@ -1350,7 +1560,7 @@ const requestMessage = ref('')
 
 async function loadVolunteerAvailability() {
   if (!bookVolunteerId.value) return alert('Enter volunteer userId')
-  const data = await fetch(`${API}/volunteers/${bookVolunteerId.value.trim()}/availability`).then(r=>r.json())
+  const data = await api(`/volunteers/${bookVolunteerId.value.trim()}/availability`, { method: 'GET' })
   volunteerAvail.value = Array.isArray(data) ? data : []
   bookDate.value = volunteerAvail.value[0]?.date || ''
   bookSlots.value = volunteerAvail.value.find(d => d.date === bookDate.value)?.slots || []
@@ -1427,7 +1637,7 @@ async function unfollowById(targetId) {
 async function loadDashboard() {
   const id = (statsVolunteerId.value || (user.value && user.value._id) || '').trim()
   if (!id) return alert('Enter a volunteer userId or login to use your own')
-  const data = await fetch(`${API}/users/${id}/dashboard`).then(r => r.json())
+  const data = await api(`/users/${id}/dashboard`, { method: 'GET' })
   if (data?.message) { alert(data.message); return }
   dashboard.value = data
 }
@@ -1545,11 +1755,41 @@ function scrollToBottom() {
   el.scrollTop = el.scrollHeight
 }
 
+// student progress
+async function loadMyProgress() {
+  try {
+    const data = await api('/users/me/progress', { method: 'GET' });
+    progress.value = data || {};
+  } catch (e) {
+    console.error('loadMyProgress failed', e);
+    alert(e.message || 'Failed to load progress');
+  }
+}
+
 // lifecycle
+const _storageHandler = (e) => {
+  if (e.key === 'token') {
+    token.value = e.newValue || '';
+    if (!token.value) user.value = null;
+  }
+  if (e.key === 'user') {
+    try { user.value = JSON.parse(e.newValue || 'null'); } catch { user.value = null; }
+  }
+};
+
 onMounted(() => {
-  if (user.value && token.value) { connectSocket(); switchTab('explore') }
+  if (user.value && token.value) {
+    connectSocket();
+    switchTab('explore');
+    if (user.value.role === 'student') loadMyProgress();
+  }
+  window.addEventListener('storage', _storageHandler);
+});
+
+onBeforeUnmount(() => {
+  if (socket.value) socket.value.disconnect();
+  window.removeEventListener('storage', _storageHandler);
 })
-onBeforeUnmount(() => { if (socket.value) socket.value.disconnect() })
 </script>
 
 <style>
@@ -1558,9 +1798,56 @@ onBeforeUnmount(() => { if (socket.value) socket.value.disconnect() })
 .card.tiny { padding: 6px 8px; border-radius: 8px; }
 .stat { font-size: 24px; font-weight: 700; }
 
-/* Optional: ensure inputs don’t shrink in flex rows */
+/* Optional: ensure inputs don't shrink in flex rows */
 input[type="text"], input[type="number"], input[type="password"], textarea, select {
   min-width: 0;
+}
+
+/* clickable name + card hover */
+.clickable { 
+  cursor: pointer; 
+  text-decoration: none; 
+  color: inherit; 
+}
+.clickable:hover { 
+  text-decoration: underline; 
+  color: #60a5fa; 
+}
+
+/* small effect when hovering cards */
+.card:hover { 
+  transform: translateY(-2px); 
+  transition: transform .12s ease; 
+}
+
+/* profile modal */
+.profile-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index: 1200;
+  padding: 18px;
+}
+
+.profile-modal {
+  width: min(1000px, 96%);
+  max-height: 88vh;
+  overflow: auto;
+  background: var(--card-bg, #0b1220);
+  border-radius: 10px;
+  padding: 14px;
+  box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+}
+
+.profile-modal .badge {
+  font-size: 0.8em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #1a202c;
 }
 </style>
 

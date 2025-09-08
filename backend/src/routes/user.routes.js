@@ -13,7 +13,7 @@ const router = Router();
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid((id || "").trim());
 
 /* =========================================================
-   ME (profile, badges, network)
+   ME (profile, badges, network, progress)
    ========================================================= */
 
 // Get my profile (safe, no password)
@@ -58,6 +58,81 @@ router.get("/me/network", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("GET /users/me/network failed:", err);
     return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// === Student Progress Tracking ===
+router.get("/me/progress", requireAuth, async (req, res) => {
+  try {
+    const uid = req.user._id;
+
+    // load student's sessions
+    const sessions = await SessionRequest.find({ student: uid }).lean();
+
+    const totalSessions = sessions.length;
+    const completedSessions = sessions.filter(s => s.status === "completed").length;
+
+    // hours learned: assume 1 hr per completed session unless you store durations
+    const hoursLearned = completedSessions * 1;
+
+    const scheduledSessions = sessions
+      .filter(s => s.status === "scheduled" || s.final)
+      .map(s => ({
+        _id: s._id,
+        subject: s.subject,
+        date: s.final?.date || s.proposed?.date || null,
+        time: s.final?.time || s.proposed?.time || null,
+        volunteer: s.volunteer,
+      }));
+
+    // reviews authored by this student
+    const reviews = await Review.find({ author: uid }).lean();
+    const avgRating = reviews.length
+      ? reviews.reduce((a, r) => a + (r.rating || 0), 0) / reviews.length
+      : null;
+
+    // subjects/topics covered
+    const subjectsCount = {};
+    for (const s of sessions) {
+      const sub = s.subject || "General";
+      subjectsCount[sub] = (subjectsCount[sub] || 0) + 1;
+    }
+    const subjects = Object.entries(subjectsCount)
+      .map(([subject, count]) => ({ subject, count }))
+      .sort((a, b) => b.count - a.count);
+
+    // badges (from user doc)
+    const me = await User.findById(uid).lean();
+    const badges = me?.badges || [];
+
+    // weekly streak: distinct days with completed session in last 7 days
+    const now = new Date();
+    const sevenAgo = new Date();
+    sevenAgo.setDate(now.getDate() - 6);
+    const days = new Set();
+    sessions.forEach(s => {
+      const d = s.completedAt || s.final?.date || s.createdAt;
+      if (d) {
+        const day = new Date(d).toISOString().slice(0, 10);
+        const dt = new Date(day);
+        if (dt >= new Date(sevenAgo.toISOString().slice(0, 10))) days.add(day);
+      }
+    });
+    const weeklyStreak = days.size;
+
+    return res.json({
+      totalSessions,
+      completedSessions,
+      hoursLearned,
+      scheduledSessions,
+      avgRating,
+      subjects,
+      badges,
+      weeklyStreak,
+    });
+  } catch (err) {
+    console.error("GET /users/me/progress failed:", err);
+    return res.status(500).json({ message: "Server error", error: err.message });
   }
 });
 

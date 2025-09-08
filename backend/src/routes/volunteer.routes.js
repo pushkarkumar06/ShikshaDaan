@@ -6,6 +6,7 @@ import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import Volunteer from "../models/volunteer.js";
 import Review from "../models/Review.js";
+import User from "../models/user.js";
 import cloudinary from "../utils/cloudinary.js";
 
 const router = Router();
@@ -103,12 +104,10 @@ function uploadBufferToCloudinary(buffer) {
 
 /* ======================================
    List Volunteers (public)
+   GET /api/volunteers
+   Optional: ?subject=Math
+   Returns public fields + computed photoUrl and name for FE
    ====================================== */
-/**
- * GET /api/volunteers
- * Optional: ?subject=Math
- * Returns public fields + computed photoUrl for old UI
- */
 router.get("/", async (req, res) => {
   try {
     const { subject } = req.query;
@@ -119,11 +118,23 @@ router.get("/", async (req, res) => {
         "userId education experience bio subjects languages hourlyRate specialties location timezone avatar"
       )
       .limit(30)
+      .populate("userId", "name") // expect userId is a ref to User
       .lean();
 
-    // add photoUrl for frontend compatibility
+    // add photoUrl and name for frontend compatibility
     const shaped = (list || []).map((v) => ({
-      ...v,
+      _id: v._id,
+      userId: v.userId?._id || v.userId,
+      name: v.userId?.name || null,
+      education: v.education,
+      experience: v.experience,
+      bio: v.bio,
+      subjects: v.subjects || [],
+      languages: v.languages || [],
+      specialties: v.specialties || [],
+      hourlyRate: v.hourlyRate ?? null,
+      location: v.location ?? null,
+      timezone: v.timezone ?? null,
       photoUrl: v?.avatar?.url || null,
     }));
 
@@ -136,18 +147,8 @@ router.get("/", async (req, res) => {
 
 /* ======================================
    Update own profile
+   PUT /api/volunteers/me
    ====================================== */
-/**
- * PUT /api/volunteers/me
- * Body can include:
- *  education, experience, bio,
- *  subjects[], languages[], specialties[],
- *  hourlyRate (number >= 0),
- *  timezone (string),
- *  location (string or {city,state,country,lat,lng}),
- *  availability[] (validated),
- *  photoUrl (OPTIONAL – sets avatar.url only; for legacy/manual URLs)
- */
 router.put("/me", requireAuth, requireRole("volunteer"), async (req, res) => {
   try {
     const payload = {};
@@ -194,8 +195,16 @@ router.put("/me", requireAuth, requireRole("volunteer"), async (req, res) => {
       )
       .lean();
 
-    // add photoUrl for FE
-    return res.json({ ...updated, photoUrl: updated?.avatar?.url || null });
+    // add photoUrl for FE and include user name if ref is available
+    let name = null;
+    if (updated?.userId) {
+      try {
+        const u = await User.findById(updated.userId).select("name").lean();
+        name = u?.name || null;
+      } catch (e) { /* ignore */ }
+    }
+
+    return res.json({ ...updated, photoUrl: updated?.avatar?.url || null, name });
   } catch (err) {
     if (err?.name === "ValidationError") {
       return res.status(400).json({ message: err.message });
@@ -207,6 +216,7 @@ router.put("/me", requireAuth, requireRole("volunteer"), async (req, res) => {
 
 /* ======================================
    Get own profile (simple)
+   GET /api/volunteers/me
    ====================================== */
 router.get("/me", requireAuth, async (req, res) => {
   try {
@@ -216,7 +226,14 @@ router.get("/me", requireAuth, async (req, res) => {
       )
       .lean();
     if (!profile) return res.json(null);
-    return res.json({ ...profile, photoUrl: profile?.avatar?.url || null });
+
+    let name = null;
+    try {
+      const u = await User.findById(profile.userId).select("name role").lean();
+      name = u?.name || null;
+    } catch (e) { /* ignore */ }
+
+    return res.json({ ...profile, photoUrl: profile?.avatar?.url || null, name });
   } catch (err) {
     console.error("GET /volunteers/me failed:", err);
     return res.status(500).json({ message: "Server error" });
@@ -225,6 +242,7 @@ router.get("/me", requireAuth, async (req, res) => {
 
 /* ======================================
    Get public profile + reviews
+   GET /api/volunteers/:userId
    ====================================== */
 router.get("/:userId", async (req, res) => {
   try {
@@ -241,12 +259,22 @@ router.get("/:userId", async (req, res) => {
 
     if (!profile) return res.status(404).json({ message: "Volunteer profile not found" });
 
+    // fetch user name
+    let userDoc = null;
+    try {
+      userDoc = await User.findById(userId).select("name role").lean();
+    } catch (e) { /* ignore */ }
+
     const reviews = await Review.find({ volunteer: userId })
       .populate("author", "name")
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json({ profile: { ...profile, photoUrl: profile?.avatar?.url || null }, reviews });
+    return res.json({
+      profile: { ...profile, photoUrl: profile?.avatar?.url || null },
+      user: { _id: userDoc?._id || userId, name: userDoc?.name || null, role: userDoc?.role || 'volunteer' },
+      reviews,
+    });
   } catch (err) {
     console.error("GET /volunteers/:userId failed:", err);
     return res.status(500).json({ message: "Server error" });
@@ -255,6 +283,7 @@ router.get("/:userId", async (req, res) => {
 
 /* ======================================
    Availability
+   GET /api/volunteers/:userId/availability
    ====================================== */
 router.get("/:userId/availability", async (req, res) => {
   try {
@@ -347,11 +376,8 @@ router.patch("/me/availability", requireAuth, requireRole("volunteer"), async (r
 
 /* ======================================
    Avatar upload / delete
-   - Accepts **avatar** OR **photo** field names
-   - Returns photoUrl for FE
    ====================================== */
 function avatarMiddleware(req, res, next) {
-  // accept either field name: avatar OR photo
   const handler = uploadAvatar.fields([
     { name: "avatar", maxCount: 1 },
     { name: "photo",  maxCount: 1 },
@@ -371,7 +397,6 @@ function avatarMiddleware(req, res, next) {
 async function setAvatarFromUpload(req, res) {
   try {
     assertCloudinaryConfig();
-    // pick whichever was sent
     const f1 = req.files?.avatar?.[0];
     const f2 = req.files?.photo?.[0];
     const file = f1 || f2;
@@ -383,7 +408,6 @@ async function setAvatarFromUpload(req, res) {
     let vol = await Volunteer.findOne({ userId: req.user._id });
     if (!vol) vol = await Volunteer.create({ userId: req.user._id });
 
-    // delete old on Cloudinary (non-fatal)
     const oldPublicId = vol?.avatar?.publicId;
     if (oldPublicId) {
       try {
@@ -393,7 +417,6 @@ async function setAvatarFromUpload(req, res) {
       }
     }
 
-    // upload new
     const result = await uploadBufferToCloudinary(file.buffer);
     vol.avatar = {
       publicId: result.public_id,
@@ -423,13 +446,8 @@ async function setAvatarFromUpload(req, res) {
   }
 }
 
-// POST /me/avatar  (primary)
 router.post("/me/avatar", requireAuth, requireRole("volunteer"), avatarMiddleware, setAvatarFromUpload);
-
-// POST /me/photo   (alias used by your FE)
 router.post("/me/photo", requireAuth, requireRole("volunteer"), avatarMiddleware, setAvatarFromUpload);
-
-// DELETE /me/avatar
 router.delete("/me/avatar", requireAuth, requireRole("volunteer"), async (req, res) => {
   try {
     assertCloudinaryConfig();
