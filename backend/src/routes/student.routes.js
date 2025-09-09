@@ -4,7 +4,7 @@ import mongoose from "mongoose";
 import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import Student from "../models/student.js";
-import User from "../models/user.js";
+import User from "../models/user.js"; // <-- added
 import cloudinary from "../utils/cloudinary.js";
 
 const router = Router();
@@ -28,47 +28,8 @@ async function uploadToCloudinary(buffer) {
 }
 
 /**
- * GET /api/students
- * Optional: ?interest=XYZ
- * Public list of students (shaped for frontend)
- */
-router.get("/", async (req, res) => {
-  try {
-    const { interest } = req.query;
-    const q = {};
-    if (interest) {
-      q.interests = { $regex: new RegExp(interest, "i") };
-    }
-
-    // populate user name (assumes Student.userId is ref to User)
-    const students = await Student.find(q)
-      .select("-__v")
-      .populate("userId", "name")
-      .limit(50)
-      .lean();
-
-    const shaped = (students || []).map((s) => ({
-      _id: s._id,
-      userId: s.userId?._id || s.userId,
-      name: s.userId?.name || null,
-      college: s.college || null,
-      course: s.course || null,
-      year: s.year || null,
-      interests: s.interests || [],
-      bio: s.bio || null,
-      photoUrl: s.profilePicture?.url || null,
-    }));
-
-    res.json(shaped);
-  } catch (err) {
-    console.error("GET /students failed:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-/**
  * GET /api/students/:userId
- * Public student profile (flattened)
+ * Public student profile (includes name + photoUrl)
  */
 router.get("/:userId", async (req, res) => {
   try {
@@ -77,39 +38,19 @@ router.get("/:userId", async (req, res) => {
       return res.status(400).json({ message: "Invalid userId" });
     }
 
-    const profile = await Student.findOne({ userId })
-      .select("-__v")
-      .lean();
-
+    const profile = await Student.findOne({ userId }).lean();
     if (!profile) return res.status(404).json({ message: "Student profile not found" });
 
-    // also include user's name if available
-    let userDoc = null;
-    try {
-      userDoc = await User.findById(userId).select("name role").lean();
-    } catch (e) { /* ignore */ }
+    const u = await User.findById(userId).select("name email").lean();
 
-    // shape profile for frontend
-    const shaped = {
-      _id: profile._id,
-      userId: profile.userId,
-      college: profile.college || null,
-      course: profile.course || null,
-      year: profile.year || null,
-      academicLevel: profile.academicLevel || null,
-      interests: profile.interests || [],
-      skillsToLearn: profile.skillsToLearn || [],
-      languages: profile.languages || [],
-      bio: profile.bio || null,
-      profilePicture: profile.profilePicture || null,
-      photoUrl: profile.profilePicture?.url || null,
-      // include any other fields you want to expose from student schema:
-      // e.g., completedSessions, badges etc. (if present)
-    };
+    // normalize photo url if present
+    const photoUrl = profile.profilePicture?.url || profile.photoUrl || null;
 
     return res.json({
-      profile: shaped,
-      user: { _id: userDoc?._id || userId, name: userDoc?.name || null, role: userDoc?.role || 'student' }
+      ...profile,
+      name: u?.name || null,
+      email: u?.email || null,
+      photoUrl
     });
   } catch (err) {
     console.error("GET /students/:userId failed:", err);
@@ -143,30 +84,46 @@ router.put("/me", requireAuth, requireRole("student"), async (req, res) => {
       { new: true, upsert: true }
     ).lean();
 
-    // attach photoUrl if exists
-    const shaped = { ...profile, photoUrl: profile?.profilePicture?.url || null };
-
-    res.json(shaped);
+    res.json(profile);
   } catch (err) {
     console.error("PUT /students/me failed:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
 
-/**
- * GET /api/students/me
- * returns your own student profile (flattened)
- */
-router.get("/me", requireAuth, requireRole("student"), async (req, res) => {
+// GET /api/students?interest=XYZ
+router.get("/", async (req, res) => {
   try {
-    const profile = await Student.findOne({ userId: req.user._id }).lean();
-    if (!profile) return res.json(null);
-    return res.json({ ...profile, photoUrl: profile.profilePicture?.url || null });
+    const { interest } = req.query;
+    let query = {};
+    if (interest) {
+      query.interests = { $regex: new RegExp(interest, "i") }; // case insensitive match
+    }
+
+    const students = await Student.find(query).select("-__v").lean();
+
+    // attach name/photo for each student from User document if exists
+    const userIds = students.map(s => s.userId).filter(Boolean);
+    const users = userIds.length ? await User.find({ _id: { $in: userIds } }).select("name email").lean() : [];
+    const userMap = new Map(users.map(u => [String(u._id), u]));
+
+    const shaped = students.map(s => {
+      const u = userMap.get(String(s.userId)) || {};
+      return {
+        ...s,
+        name: u.name || null,
+        email: u.email || null,
+        photoUrl: s.profilePicture?.url || s.photoUrl || null
+      };
+    });
+
+    res.json(shaped);
   } catch (err) {
-    console.error("GET /students/me failed:", err);
+    console.error("GET /students failed:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
+
 
 /**
  * POST /api/students/me/photo
@@ -203,15 +160,21 @@ router.post(
       };
       await profile.save();
 
-      const shaped = profile.toObject();
-      shaped.photoUrl = shaped.profilePicture?.url || null;
-
-      res.json(shaped);
+      const profileObj = profile.toObject();
+      const u = await User.findById(req.user._id).select("name email").lean();
+      res.json({
+        ...profileObj,
+        name: u?.name || null,
+        email: u?.email || null,
+        photoUrl: profile.profilePicture?.url || null
+      });
     } catch (err) {
       console.error("POST /students/me/photo failed:", err);
+      // 🔥 include real error
       res.status(500).json({
         message: "Server error",
         error: err.message,
+        stack: err.stack,
       });
     }
   }

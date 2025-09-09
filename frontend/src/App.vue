@@ -359,55 +359,67 @@
     <button @click="loadExplore">Apply Filter</button>
   </div>
 
-  <!-- Results -->
-  <div class="row" style="margin-top:10px;">
-    <div v-for="p in exploreResults" :key="p._id" class="card" style="flex:1; min-width:260px;">
-      <div class="row" style="gap:10px; align-items:center">
-        <img
-          v-if="p.photoUrl || p.profilePicture?.url || p.avatar?.url"
-          :src="p.photoUrl || p.profilePicture?.url || p.avatar?.url"
-          alt="Profile"
-          style="width:52px; height:52px; border-radius:50%; object-fit:cover; border:1px solid #e2e8f0"
-        >
-        <div style="flex:1">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <a class="user-name clickable" @click.prevent="openProfile(p.userId, p.role || (isStudent ? 'volunteer' : 'student'))">
-              <b>{{ p.name || p.userId || (isStudent ? 'Volunteer' : 'Student') }}</b>
-            </a>
-            <span class="badge">{{ p.role || (isStudent ? 'volunteer' : 'student') }}</span>
-          </div>
-          <div class="small">userId: {{ p.userId }}</div>
+  <!-- Results (replace existing block) -->
+<div class="row" style="margin-top:10px;">
+  <div
+    v-for="p in exploreResults"
+    :key="p._id || p.userId"
+    class="card"
+    style="flex:1; min-width:260px;"
+    @mouseenter="preloadProfile(p.userId, p.role || (isStudent ? 'volunteer' : 'student'))"
+  >
+    <div class="row" style="gap:10px; align-items:center">
+      <img
+        v-if="p.photoUrl || p.profilePicture?.url || p.avatar?.url"
+        :src="p.photoUrl || p.profilePicture?.url || p.avatar?.url"
+        alt="Profile"
+        style="width:52px; height:52px; border-radius:50%; object-fit:cover; border:1px solid #e2e8f0"
+      />
+      <div style="flex:1">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <!-- clickable name opens full profile -->
+          <a
+            class="user-name clickable"
+            @click.prevent="openProfile(p.userId, p.role || (isStudent ? 'volunteer' : 'student'))"
+          >
+            <b>{{ p.name || p.userId || (isStudent ? 'Volunteer' : 'Student') }}</b>
+          </a>
+          <span class="badge">{{ p.role || (isStudent ? 'volunteer' : 'student') }}</span>
         </div>
+        <div class="small">userId: {{ p.userId }}</div>
       </div>
+    </div>
 
-      <!-- Student exploring volunteers -->
-      <div v-if="isStudent">
-        <div class="small" style="margin-top:6px">
-          <span v-if="p.location">{{ p.location }}</span>
-          <span v-if="p.timezone"> • {{ p.timezone }}</span>
-          <span v-if="p.hourlyRate !== undefined"> • ₹{{ p.hourlyRate }}/hr</span>
-        </div>
-        <div>Subjects: {{ (p.subjects||[]).join(", ") }}</div>
-        <div v-if="(p.specialties||[]).length" class="small">Specialties: {{ p.specialties.join(", ") }}</div>
-        <div>Bio: {{ p.bio || '-' }}</div>
-        <div class="row" style="margin-top:8px">
-          <button v-if="user && user._id !== p.userId" @click="startChatWith(p.userId)">Message</button>
-          <button v-if="user && !isFollowingId(p.userId) && user._id !== p.userId" @click="followUser(p.userId)">Follow</button>
-          <button v-if="user && isFollowingId(p.userId)" class="ghost" @click="unfollowById(p.userId)">Unfollow</button>
-        </div>
+    <!-- Student exploring volunteers -->
+    <div v-if="isStudent">
+      <div class="small" style="margin-top:6px">
+        <span v-if="p.location">{{ p.location }}</span>
+        <span v-if="p.timezone"> • {{ p.timezone }}</span>
+        <span v-if="p.hourlyRate !== undefined"> • ₹{{ p.hourlyRate }}/hr</span>
       </div>
+      <div>Subjects: {{ (p.subjects||[]).join(", ") }}</div>
+      <div v-if="(p.specialties||[]).length" class="small">Specialties: {{ p.specialties.join(", ") }}</div>
+      <div>Bio: {{ p.bio || '-' }}</div>
+      <div class="row" style="margin-top:8px">
+        <button v-if="user && user._id !== p.userId" @click="startChatWith(p.userId)">Message</button>
+        <button v-if="user && !isFollowingId(p.userId) && user._id !== p.userId" @click="followUser(p.userId)">Follow</button>
+        <button v-if="user && isFollowingId(p.userId)" class="ghost" @click="unfollowById(p.userId)">Unfollow</button>
+      </div>
+    </div>
 
-      <!-- Volunteer exploring students -->
-      <div v-if="isVolunteer">
-        <div>Interests: {{ (p.interests||[]).join(", ") }}</div>
-        <div v-if="p.bio">Bio: {{ p.bio }}</div>
-        <div class="row" style="margin-top:8px">
-          <button @click="sendSessionRequestToStudent(p.userId)">Send Session Request</button>
-          <button class="ghost" @click="startChatWith(p.userId)">Message</button>
-        </div>
+    <!-- Volunteer exploring students -->
+    <div v-if="isVolunteer">
+      <div>Interests: {{ (p.interests||[]).join(", ") }}</div>
+      <div v-if="p.bio">Bio: {{ p.bio }}</div>
+      <div class="row" style="margin-top:8px">
+        <button @click="sendSessionRequestToStudent(p.userId)">Send Session Request</button>
+        <button class="ghost" @click="startChatWith(p.userId)">Message</button>
       </div>
     </div>
   </div>
+</div>
+
+
 
   <!-- Volunteer quick send (only visible for volunteers) -->
   <!-- Volunteer quick send: choose from YOUR availability -->
@@ -775,45 +787,79 @@
     </div>
   </div>
 
-  <!-- FULL PROFILE MODAL: paste before the final closing container tag in template -->
-  <div v-if="selectedProfile" class="profile-modal-backdrop" @click.self="closeProfile">
-    <div class="profile-modal card">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div style="display:flex; gap:12px; align-items:center;">
-          <img v-if="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url" 
-               :src="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url" 
-               alt="profile" 
-               style="width:64px;height:64px;border-radius:8px;object-fit:cover;border:1px solid #e2e8f0"/>
-          <div>
-            <div style="font-size:18px;font-weight:700">{{ selectedProfile.name || selectedProfile.userId }}</div>
-            <div class="small">{{ selectedProfile.role || selectedProfile.type }}</div>
-          </div>
+  <!-- FULL PROFILE MODAL -->
+<div v-if="selectedProfile" class="profile-modal-backdrop" @click.self="closeProfile">
+  <div class="profile-modal card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <div style="display:flex; gap:12px; align-items:center;">
+        <img
+          v-if="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url"
+          :src="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url"
+          alt="profile"
+          style="width:64px;height:64px;border-radius:8px;object-fit:cover;border:1px solid #e2e8f0"
+        />
+        <div>
+          <div style="font-size:18px;font-weight:700">{{ selectedProfile.name || selectedProfile.userId }}</div>
+          <div class="small">{{ selectedProfile.role || selectedProfile.type }}</div>
         </div>
-        <div><button class="ghost" @click="closeProfile">Close</button></div>
       </div>
+      <div><button class="ghost" @click="closeProfile">Close</button></div>
+    </div>
 
-      <hr />
+    <hr />
 
-      <div style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
+    <!-- Use dedicated components if available, otherwise show fallback summary + raw -->
+    <div v-if="(selectedProfile.role || '').toLowerCase() === 'volunteer'">
+      <!-- if you created VolunteerProfile.vue it will be used -->
+      <VolunteerProfile v-if="$options.components?.VolunteerProfile" :profile="selectedProfile" />
+      <div v-else style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
         <div style="flex:1; min-width:260px">
           <div><b>About</b></div>
           <div class="small">{{ selectedProfile.bio || '-' }}</div>
           <div style="margin-top:8px"><b>Location / Timezone</b></div>
           <div class="small">{{ selectedProfile.location || '-' }} {{ selectedProfile.timezone ? (' • ' + selectedProfile.timezone) : '' }}</div>
-          <div style="margin-top:8px"><b>Subjects / Interests</b></div>
-          <div class="small">{{ (selectedProfile.subjects || selectedProfile.interests || []).join(', ') || '-' }}</div>
+          <div style="margin-top:8px"><b>Subjects</b></div>
+          <div class="small">{{ (selectedProfile.subjects || []).join(', ') || '-' }}</div>
         </div>
-
         <div style="flex:1; min-width:260px">
           <div><b>Extras</b></div>
           <div class="small">Hourly rate: {{ selectedProfile.hourlyRate !== undefined ? '₹' + selectedProfile.hourlyRate + '/hr' : '-' }}</div>
-          <div class="small">College / Course: {{ selectedProfile.college || selectedProfile.course || '-' }}</div>
+          <div class="small">Education: {{ selectedProfile.education || '-' }}</div>
           <div style="margin-top:8px"><b>Raw (for quick debug)</b></div>
-          <pre style="max-height:160px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
+          <pre style="max-height:260px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
         </div>
       </div>
     </div>
+
+    <div v-else-if="(selectedProfile.role || '').toLowerCase() === 'student'">
+      <StudentProfile v-if="$options.components?.StudentProfile" :profile="selectedProfile" />
+      <div v-else style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:260px">
+          <div><b>About</b></div>
+          <div class="small">{{ selectedProfile.bio || '-' }}</div>
+          <div style="margin-top:8px"><b>College / Course</b></div>
+          <div class="small">{{ selectedProfile.college || selectedProfile.course || '-' }}</div>
+          <div style="margin-top:8px"><b>Interests</b></div>
+          <div class="small">{{ (selectedProfile.interests || []).join(', ') || '-' }}</div>
+        </div>
+        <div style="flex:1; min-width:260px">
+          <div><b>Extras</b></div>
+          <div class="small">Year: {{ selectedProfile.year || '-' }}</div>
+          <div style="margin-top:8px"><b>Raw (for quick debug)</b></div>
+          <pre style="max-height:260px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
+        </div>
+      </div>
+    </div>
+
+    <div v-else>
+      <!-- unknown/legacy type -->
+      <div style="margin-top:8px">
+        <pre style="max-height:400px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
+      </div>
+    </div>
   </div>
+</div>
+
 </template>
 
 
@@ -821,6 +867,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { io } from 'socket.io-client'
+import VolunteerProfile from './components/VolunteerProfile.vue'
+import StudentProfile from './components/StudentProfile.vue'
+
 
 const API = 'http://localhost:5000/api'
 const WS_URL = 'http://localhost:5000'
@@ -836,7 +885,12 @@ const exploreStudentDate = ref('')    // yyyy-mm-dd or leave empty
 const exploreStudentTime = ref('')    // e.g. 10:00 or empty
 const exploreVolunteerAvail = ref([])  // for storing loaded availability
 const exploreBookSlots = ref([])       // for slots of the selected date
-const notifTotalUnread = ref(0)      
+const notifTotalUnread = ref(0)   
+const showProfileModal = ref(false)
+const currentProfile = ref(null)
+const currentProfileType = ref('') // 'volunteer' or 'student'
+const currentProfileReviews = ref([]) // for volunteer reviews
+
 
 // forms
 const signupForm = reactive({ name: '', email: '', password: '', role: 'volunteer' })
@@ -1241,6 +1295,8 @@ const exploreId = ref('')
 const selectedProfile = ref(null)
 const loadingProfile = ref(false)
 
+
+
 // open profile (role should be 'volunteer' or 'student' or read from server)
 async function openProfile(userId, roleHint = '') {
   // First try to find user in exploreResults
@@ -1332,6 +1388,39 @@ async function openProfile(userId, roleHint = '') {
     loadingProfile.value = false; 
   }
 }
+
+
+// simple in-memory cache to avoid re-fetching on hover/click
+const profileCache = ref(new Map())
+
+async function preloadProfile(userId, roleHint = '') {
+  if (!userId) return
+  if (profileCache.value.has(userId)) return profileCache.value.get(userId)
+
+  try {
+    // try volunteer first if hint says volunteer, else student accordingly
+    let data
+    if ((roleHint || '').toLowerCase() === 'volunteer') {
+      data = await api(`/volunteers/${userId}`, { method: 'GET' }).catch(() => null)
+      if (data) { profileCache.value.set(userId, (data.profile || data)); return (data.profile || data) }
+    } else if ((roleHint || '').toLowerCase() === 'student') {
+      data = await api(`/students/${userId}`, { method: 'GET' }).catch(() => null)
+      if (data) { profileCache.value.set(userId, data); return data }
+    } else {
+      // try volunteer then student
+      data = await api(`/volunteers/${userId}`, { method: 'GET' }).catch(() => null)
+      if (data) { profileCache.value.set(userId, (data.profile || data)); return (data.profile || data) }
+      data = await api(`/students/${userId}`, { method: 'GET' }).catch(() => null)
+      if (data) { profileCache.value.set(userId, data); return data }
+    }
+  } catch (e) {
+    // ignore preload errors
+    console.debug('preloadProfile failed', e?.message || e)
+    return null
+  }
+}
+
+
 
 function closeProfile() {
   selectedProfile.value = null
