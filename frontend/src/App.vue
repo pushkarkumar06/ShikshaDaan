@@ -752,11 +752,6 @@
       </div>
 
       <div style="margin-top:12px">
-        <h3>Average rating you gave</h3>
-        <div class="small">{{ progress.avgRating ? progress.avgRating.toFixed(2) + '/5' : 'No ratings yet' }}</div>
-      </div>
-
-      <div style="margin-top:12px">
         <h3>Top subjects</h3>
         <div v-if="(progress.subjects || []).length">
           <div v-for="s in progress.subjects" :key="s.subject" class="row" style="justify-content:space-between">
@@ -785,90 +780,115 @@
         <div v-else class="small">No badges yet.</div>
       </div>
     </div>
-  </div>
+</div>
 
-  <!-- FULL PROFILE MODAL -->
+
+
+
+<!-- FULL PROFILE MODAL -->
 <div v-if="selectedProfile" class="profile-modal-backdrop" @click.self="closeProfile">
   <div class="profile-modal card">
+    <!-- Header -->
     <div style="display:flex; justify-content:space-between; align-items:center;">
       <div style="display:flex; gap:12px; align-items:center;">
         <img
           v-if="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url"
           :src="selectedProfile.photoUrl || selectedProfile.profilePicture?.url || selectedProfile.avatar?.url"
           alt="profile"
-          style="width:64px;height:64px;border-radius:8px;object-fit:cover;border:1px solid #e2e8f0"
+          style="width:60px; height:60px; border-radius:50%; object-fit:cover;"
         />
         <div>
-          <div style="font-size:18px;font-weight:700">{{ selectedProfile.name || selectedProfile.userId }}</div>
-          <div class="small">{{ selectedProfile.role || selectedProfile.type }}</div>
+          <h2 style="margin:0">{{ selectedProfile.name || 'No name' }}</h2>
+          <div class="small" style="margin-top:4px">
+            {{ selectedProfile.role || 'User' }} • {{ selectedProfile.userId || selectedProfile._id }}
+          </div>
         </div>
       </div>
-      <div><button class="ghost" @click="closeProfile">Close</button></div>
+
+      <div style="display:flex; gap:8px; align-items:center;">
+        <div v-if="user && (selectedProfile.userId || selectedProfile._id) !== user._id" class="row" style="gap:8px">
+          <button class="primary" @click="startVideoCall(selectedProfile.userId || selectedProfile._id)">
+            <span style="display:inline-flex; align-items:center; gap:4px">
+              <span>🎥</span> Video Call
+            </span>
+          </button>
+        </div>
+        <button class="ghost" @click="closeProfile">Close</button>
+      </div>
     </div>
 
     <hr />
 
-    <!-- Use dedicated components if available, otherwise show fallback summary + raw -->
-    <div v-if="(selectedProfile.role || '').toLowerCase() === 'volunteer'">
-      <!-- if you created VolunteerProfile.vue it will be used -->
-      <VolunteerProfile v-if="$options.components?.VolunteerProfile" :profile="selectedProfile" />
-      <div v-else style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
+    <!-- Role-specific rendering -->
+    <div v-if="selectedProfile.role === 'volunteer'">
+      <VolunteerProfile
+        :profile="selectedProfile"
+        :reviews="currentProfileReviews"
+        @start-call="(payload) => $emit('start-call', payload)"
+      />
+    </div>
+
+    <div v-else-if="selectedProfile.role === 'student'">
+      <StudentProfile :profile="selectedProfile" />
+    </div>
+
+    <!-- Fallback layout when role unknown -->
+    <div v-else style="margin-top:8px">
+      <div style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
         <div style="flex:1; min-width:260px">
           <div><b>About</b></div>
           <div class="small">{{ selectedProfile.bio || '-' }}</div>
+
           <div style="margin-top:8px"><b>Location / Timezone</b></div>
-          <div class="small">{{ selectedProfile.location || '-' }} {{ selectedProfile.timezone ? (' • ' + selectedProfile.timezone) : '' }}</div>
-          <div style="margin-top:8px"><b>Subjects</b></div>
-          <div class="small">{{ (selectedProfile.subjects || []).join(', ') || '-' }}</div>
+          <div class="small">
+            {{ typeof selectedProfile.location === 'string'
+              ? selectedProfile.location
+              : ([selectedProfile.location?.city, selectedProfile.location?.state, selectedProfile.location?.country]
+                  .filter(Boolean)
+                  .join(', '))
+              || '-' }}
+            {{ selectedProfile.timezone ? (' • ' + selectedProfile.timezone) : '' }}
+          </div>
+
+          <div style="margin-top:8px"><b>Subjects / Interests</b></div>
+          <div class="small">{{ (selectedProfile.subjects || selectedProfile.interests || []).join(', ') || '-' }}</div>
         </div>
+
         <div style="flex:1; min-width:260px">
           <div><b>Extras</b></div>
-          <div class="small">Hourly rate: {{ selectedProfile.hourlyRate !== undefined ? '₹' + selectedProfile.hourlyRate + '/hr' : '-' }}</div>
-          <div class="small">Education: {{ selectedProfile.education || '-' }}</div>
-          <div style="margin-top:8px"><b>Raw (for quick debug)</b></div>
-          <pre style="max-height:260px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
+          <div class="small">
+            Hourly rate:
+            {{ selectedProfile.hourlyRate !== undefined && selectedProfile.hourlyRate !== null ? ('₹' + selectedProfile.hourlyRate + '/hr') : '-' }}
+          </div>
         </div>
-      </div>
-    </div>
-
-    <div v-else-if="(selectedProfile.role || '').toLowerCase() === 'student'">
-      <StudentProfile v-if="$options.components?.StudentProfile" :profile="selectedProfile" />
-      <div v-else style="display:flex; gap:18px; margin-top:8px; flex-wrap:wrap;">
-        <div style="flex:1; min-width:260px">
-          <div><b>About</b></div>
-          <div class="small">{{ selectedProfile.bio || '-' }}</div>
-          <div style="margin-top:8px"><b>College / Course</b></div>
-          <div class="small">{{ selectedProfile.college || selectedProfile.course || '-' }}</div>
-          <div style="margin-top:8px"><b>Interests</b></div>
-          <div class="small">{{ (selectedProfile.interests || []).join(', ') || '-' }}</div>
-        </div>
-        <div style="flex:1; min-width:260px">
-          <div><b>Extras</b></div>
-          <div class="small">Year: {{ selectedProfile.year || '-' }}</div>
-          <div style="margin-top:8px"><b>Raw (for quick debug)</b></div>
-          <pre style="max-height:260px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
-        </div>
-      </div>
-    </div>
-
-    <div v-else>
-      <!-- unknown/legacy type -->
-      <div style="margin-top:8px">
-        <pre style="max-height:400px; overflow:auto; background:#0f1724; color:#cbd5e1; padding:8px; border-radius:6px;">{{ JSON.stringify(selectedProfile, null, 2) }}</pre>
       </div>
     </div>
   </div>
 </div>
 
+<!-- Video Call Room -->
+<!-- Video Call Room -->
+<div v-if="user" class="card" style="margin-top: 20px;">
+  <h2>Video Call</h2>
+  <CallRoom
+    :room-id="user._id"
+    :user-id="user._id"
+    :user-name="user.name || 'User'"
+    :user-role="user.role"
+    @leave-call="handleLeaveCall"
+  />
+</div>
+
+
 </template>
-
-
-
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { io } from 'socket.io-client'
 import VolunteerProfile from './components/VolunteerProfile.vue'
 import StudentProfile from './components/StudentProfile.vue'
+import CallRoom from './components/CallRoom.vue'
+
+
 
 
 const API = 'http://localhost:5000/api'
@@ -1117,6 +1137,31 @@ async function respondToRequest(rOrId, action) {
   }
 }
 
+async function handleReviewSubmitted(reviewData) {
+  try {
+    // Assuming your API expects { volunteerId, rating, comment }
+    const response = await api('/reviews', {
+      method: 'POST',
+      body: JSON.stringify({
+        volunteerId: selectedProfile.value.userId || selectedProfile.value._id,
+        rating: reviewData.rating,
+        comment: reviewData.comment
+      })
+    });
+    
+    // Refresh reviews
+    if (currentProfileType.value === 'volunteer') {
+      const data = await api(`/volunteers/${selectedProfile.value.userId || selectedProfile.value._id}`);
+      currentProfileReviews.value = data.reviews || [];
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to submit review:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // acceptSession -> replaces any axios-based implementation
 async function acceptSession(session) {
   console.log("session used for accept:", session);
@@ -1298,94 +1343,81 @@ const loadingProfile = ref(false)
 
 
 // open profile (role should be 'volunteer' or 'student' or read from server)
+// replace your existing openProfile with this
 async function openProfile(userId, roleHint = '') {
-  // First try to find user in exploreResults
-  const user = exploreResults.value.find(u => u.userId === userId || u._id === userId);
-  if (user) {
-    selectedProfile.value = user;
+  if (!userId) return alert('Missing user id');
+
+  // try to find the user locally in exploreResults first
+  const local = exploreResults.value.find(u => (u.userId || u._id) === userId);
+  if (local) {
+    // if local has full details already, use them; also clear reviews
+    selectedProfile.value = local;
+    currentProfileReviews.value = local.reviews || [];
+    // optionally switch tab to 'explore' or keep current
     return;
   }
-  
-  // If not found in exploreResults, fetch from API
-  if (!userId) return alert('Missing user id')
+
+  loadingProfile.value = true;
   try {
-    loadingProfile.value = true;
-    
-    // Helper function to normalize profile data
-    const normalizeProfile = (data, role) => {
-      // Handle both { profile: {...} } and direct profile object responses
-      const profile = data.profile || data;
-      
-      // Map backend fields to frontend expected structure
-      return {
-        // Core fields
-        userId: profile.userId || userId,
-        role: role,
-        name: profile.name || '',
-        
-        // Profile picture - handle different field names
-        photoUrl: profile.photoUrl || profile.avatar?.url || profile.profilePicture?.url || '',
-        
-        // Bio and details
-        bio: profile.bio || profile.about || '',
-        
-        // Location - handle string or object format
-        location: typeof profile.location === 'string' 
-          ? profile.location 
-          : [profile.location?.city, profile.location?.state, profile.location?.country]
-              .filter(Boolean).join(', ') || '',
-        
-        // Timezone
-        timezone: profile.timezone || '',
-        
-        // Subjects/Interests - handle both arrays and comma-separated strings
-        subjects: Array.isArray(profile.subjects) 
-          ? profile.subjects 
-          : (profile.subjects || '').split(',').map(s => s.trim()).filter(Boolean),
-        
-        interests: Array.isArray(profile.interests) 
-          ? profile.interests 
-          : (profile.interests || '').split(',').map(s => s.trim()).filter(Boolean),
-        
-        // Additional fields with fallbacks
-        hourlyRate: profile.hourlyRate || null,
-        college: profile.college || profile.education?.[0]?.school || '',
-        course: profile.course || profile.education?.[0]?.degree || '',
-        
-        // Include all original fields for debugging
-        ...profile
-      };
-    };
-    
-    // use role hint to call the right endpoint
-    if ((roleHint || '').toLowerCase() === 'volunteer' || (roleHint || '').toLowerCase() === 'vol') {
+    const tryVolunteer = async () => {
       const data = await api(`/volunteers/${userId}`, { method: 'GET' });
-      selectedProfile.value = normalizeProfile(data, 'volunteer');
-      tab.value = 'volunteer';
-    } else if ((roleHint || '').toLowerCase() === 'student' || (roleHint || '').toLowerCase() === 'stu') {
+      // endpoint returns: { profile: {...}, reviews: [...] }
+      const profile = data?.profile || data;
+      currentProfileReviews.value = data?.reviews || [];
+      return { profile, role: 'volunteer' };
+    };
+
+    const tryStudent = async () => {
       const data = await api(`/students/${userId}`, { method: 'GET' });
-      selectedProfile.value = normalizeProfile(data, 'student');
-      tab.value = 'student';
+      // students endpoint returns profile directly with name/photo
+      currentProfileReviews.value = []; // students have no reviews endpoint here
+      return { profile: data, role: 'student' };
+    };
+
+    // pick based on hint; fallback try volunteer then student
+    let res;
+    if ((roleHint || '').toLowerCase().startsWith('vol')) {
+      res = await tryVolunteer();
+    } else if ((roleHint || '').toLowerCase().startsWith('stu')) {
+      res = await tryStudent();
     } else {
-      // not sure role — try both (volunteer then student)
       try {
-        const data = await api(`/volunteers/${userId}`, { method: 'GET' });
-        selectedProfile.value = normalizeProfile(data, 'volunteer');
-        tab.value = 'volunteer';
+        res = await tryVolunteer();
       } catch (e) {
-        const data = await api(`/students/${userId}`, { method: 'GET' });
-        selectedProfile.value = normalizeProfile(data, 'student');
-        tab.value = 'student';
+        res = await tryStudent();
       }
     }
-    
-    // Scroll to top of the page
+
+    // normalize a few fields for the UI
+    const normalizeProfile = (profile, role) => ({
+      userId: profile.userId || profile._id || userId,
+      name: profile.name || profile.userName || '',
+      role,
+      photoUrl: profile.photoUrl || profile.avatar?.url || profile.profilePicture?.url || '',
+      bio: profile.bio || profile.about || '',
+      location: typeof profile.location === 'string' ? profile.location : (
+        profile.location ? [profile.location.city, profile.location.state, profile.location.country].filter(Boolean).join(', ') : ''
+      ),
+      timezone: profile.timezone || '',
+      subjects: Array.isArray(profile.subjects) ? profile.subjects : (profile.subjects ? String(profile.subjects).split(',').map(s => s.trim()) : []),
+      interests: Array.isArray(profile.interests) ? profile.interests : (profile.interests ? String(profile.interests).split(',').map(s => s.trim()) : []),
+      hourlyRate: profile.hourlyRate != null ? profile.hourlyRate : null,
+      college: profile.college || (profile.education && profile.education[0] && profile.education[0].school) || '',
+      // include everything for debug too
+      __raw: profile
+    });
+
+    selectedProfile.value = normalizeProfile(res.profile || {}, res.role);
+    // set tab optionally
+    // tab.value = res.role === 'volunteer' ? 'volunteer' : 'student';
+
+    // scroll to top so modal/view is visible
     window.scrollTo(0, 0);
-  } catch (e) {
-    console.error('openProfile failed', e);
-    alert(e.message || 'Failed to load profile');
-  } finally { 
-    loadingProfile.value = false; 
+  } catch (err) {
+    console.error('openProfile failed', err);
+    alert(err?.message || 'Failed to load profile');
+  } finally {
+    loadingProfile.value = false;
   }
 }
 
@@ -1558,17 +1590,76 @@ async function sendSessionRequest() {
 async function loadMyRequests() {
   try {
     const data = await api('/sessions/mine', { method: 'GET' })
-    myRequests.value = Array.isArray(data) ? data : []
-  } catch (e) { alert(e.message) }
+    myRequests.value = Array.isArray(data) 
+      ? data.map(request => {
+          // Helper to parse date and time into ISO string
+          const parseDateTime = (dateStr, timeStr) => {
+            if (!dateStr || !timeStr) return null;
+            // Handle both 'HH:MM' and 'HH:MM-HH:MM' time formats
+            const timePart = timeStr.includes('-') ? timeStr.split('-')[0] : timeStr;
+            return new Date(`${dateStr}T${timePart}:00`).toISOString();
+          };
+          
+          // Determine the start time, checking multiple possible locations
+          let startAt = request.scheduledAt || 
+                       parseDateTime(request.final?.date, request.final?.time) ||
+                       parseDateTime(request.date, request.time);
+          
+          return {
+            ...request,
+            startAt,
+            // Ensure we have a proper date object for sorting
+            _sortDate: startAt ? new Date(startAt) : new Date(0)
+          };
+        }).sort((a, b) => {
+          // Sort by status (pending first) then by date (earliest first)
+          if (a.status === 'pending' && b.status !== 'pending') return -1;
+          if (a.status !== 'pending' && b.status === 'pending') return 1;
+          return a._sortDate - b._sortDate;
+        })
+      : [];
+  } catch (e) { 
+    console.error('Failed to load requests:', e);
+    alert(e.message || 'Failed to load session requests');
+  }
 }
 async function acceptRequest(requestId) {
   try {
-    const body = { date: acceptDate.value, time: acceptTime.value }
-    const data = await api(`/sessions/${requestId}/accept`, { method: 'POST', body: JSON.stringify(body) })
-    lastResponse.value = JSON.stringify(data, null, 2)
-    await loadMyRequests()
-    alert('Accepted & scheduled')
-  } catch (e) { alert(e.message) }
+    if (!acceptDate.value || !acceptTime.value) {
+      return alert('Please select both date and time for the session');
+    }
+    
+    const body = { 
+      date: acceptDate.value, 
+      time: acceptTime.value,
+      scheduledAt: new Date(`${acceptDate.value}T${acceptTime.value}:00`).toISOString()
+    };
+    
+    const data = await api(`/sessions/${requestId}/accept`, { 
+      method: 'POST', 
+      body: JSON.stringify(body) 
+    });
+    
+    lastResponse.value = JSON.stringify(data, null, 2);
+    
+    // Update the local state immediately for better UX
+    const requestIndex = myRequests.value.findIndex(r => r._id === requestId);
+    if (requestIndex !== -1) {
+      myRequests.value[requestIndex] = {
+        ...myRequests.value[requestIndex],
+        status: 'accepted',
+        scheduledAt: body.scheduledAt,
+        startAt: body.scheduledAt
+      };
+    } else {
+      await loadMyRequests();
+    }
+    
+    alert(`Session accepted and scheduled for ${new Date(body.scheduledAt).toLocaleString()}`);
+  } catch (e) { 
+    console.error('Error accepting request:', e);
+    alert(e.message || 'Failed to accept session request'); 
+  }
 }
 
 // notifications
@@ -1738,6 +1829,7 @@ function connectSocket() {
 
   socket.value = io(WS_URL, { auth: { token: token.value } })
 
+  // Chat related events
   socket.value.on("conversations:updated", () => { loadConversations() })
 
   socket.value.on("message:new", async ({ conversationId, message }) => {
@@ -1748,6 +1840,71 @@ function connectSocket() {
       markConversationRead(conversationId)
     } else {
       loadConversations()
+    }
+  })
+
+  // Session related events
+  socket.value.on('session:accepted', async (updatedRequest) => {
+    // Update the request in the myRequests array if it exists
+    const requestIndex = myRequests.value.findIndex(r => r._id === updatedRequest._id)
+    if (requestIndex !== -1) {
+      // Preserve existing properties while updating with new ones
+      myRequests.value[requestIndex] = { 
+        ...myRequests.value[requestIndex], 
+        ...updatedRequest,
+        status: 'accepted',
+        scheduledAt: updatedRequest.startAt || myRequests.value[requestIndex].scheduledAt
+      }
+    } else {
+      // If not found, reload the requests to get the latest state
+      await loadMyRequests()
+    }
+    
+    // Show a notification if the current user is the student
+    if (user.value && user.value._id === updatedRequest.studentId) {
+      alert(`Your session request has been accepted! ${updatedRequest.startAt ? `Scheduled for ${new Date(updatedRequest.startAt).toLocaleString()}` : ''}`)
+    }
+    }
+  })
+
+  // Handle session scheduled events
+  socket.value.on('session:scheduled', (sessionData) => {
+    // Update the request in the myRequests array if it exists
+    const requestIndex = myRequests.value.findIndex(r => r._id === sessionData._id)
+    if (requestIndex !== -1) {
+      myRequests.value[requestIndex] = { 
+        ...myRequests.value[requestIndex],
+        ...sessionData,
+        status: 'scheduled',
+        scheduledAt: sessionData.startAt
+      }
+    }
+    
+    // Show notification if current user is a participant
+    if (user.value && 
+        (user.value._id === sessionData.studentId || user.value._id === sessionData.volunteerId)) {
+      const sessionTime = new Date(sessionData.startAt).toLocaleString()
+      alert(`Session scheduled for ${sessionTime}`)
+    }
+  })
+
+  // Handle session starting soon notification
+  socket.value.on('session:starting', (session) => {
+    if (user.value) {
+      const isParticipant = user.value._id === session.studentId || 
+                          user.value._id === session.volunteerId
+      
+      if (isParticipant) {
+        const joinLink = session.zoomLink || session.joinLink || '#'
+        const message = `Session is about to start! Join now to begin your ${session.subject || ''} session.`
+        
+        // Show a more informative alert with a clickable link if available
+        if (confirm(message + '\n\nClick OK to join now')) {
+          if (joinLink && joinLink !== '#') {
+            window.open(joinLink, '_blank')
+          }
+        }
+      }
     }
   })
 }
@@ -1844,6 +2001,36 @@ function scrollToBottom() {
   el.scrollTop = el.scrollHeight
 }
 
+// Handle starting a video call with a user
+function startVideoCall(targetUserId) {
+  if (!user.value || !targetUserId) return;
+  
+  // Close any open profile modal
+  closeProfile();
+  
+  // In a real implementation, you would:
+  // 1. Create a room ID (could be a combination of user IDs or a new unique ID)
+  // 2. Update the CallRoom component with the new room ID
+  // 3. Show the CallRoom component
+  
+  const roomId = [user.value._id, targetUserId].sort().join('_');
+  
+  // For now, we'll just log and show an alert
+  console.log('Starting video call with user:', targetUserId, 'in room:', roomId);
+  alert(`Starting video call with user ${targetUserId} in room ${roomId}`);
+  
+  // In a real implementation, you would update the CallRoom component's props
+  // and show it. For example:
+  // callRoomProps.value = { roomId, targetUserId };
+  // showCallRoom.value = true;
+}
+
+// Handle leaving a video call
+function handleLeaveCall() {
+  // Any cleanup needed when leaving a call
+  console.log('Left video call');
+}
+
 // student progress
 async function loadMyProgress() {
   try {
@@ -1938,6 +2125,98 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
   background: #e2e8f0;
   color: #1a202c;
 }
+
+.profile-modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.profile-modal {
+  max-width: 800px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.profile-section, .reviews-section {
+  margin-bottom: 24px;
+}
+
+.info-section {
+  margin: 16px 0;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tag {
+  background: #e2e8f0;
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 0.875rem;
+}
+
+.review-card {
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 12px 0;
+}
+
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.reviewer {
+  font-weight: 600;
+}
+
+.rating {
+  color: #f59e0b;
+}
+
+.review-content {
+  margin: 8px 0;
+  color: #334155;
+}
+
+.review-date {
+  font-size: 0.875rem;
+  color: #64748b;
+}
+
+.debug-info {
+  background: #f1f5f9;
+  padding: 16px;
+  border-radius: 8px;
+  margin-top: 16px;
+}
+
+.debug-info pre {
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  margin: 0;
+}
+
 </style>
 
 

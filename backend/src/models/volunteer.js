@@ -14,6 +14,7 @@ const AvatarSchema = new mongoose.Schema(
   { _id: false }
 );
 
+
 const LocationSchema = new mongoose.Schema(
   {
     city: String,

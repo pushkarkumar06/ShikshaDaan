@@ -157,6 +157,71 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
 /**
  * ACCEPT / REJECT / SCHEDULE / COMPLETE / CANCEL
  */
+// Accept a session request
+router.post('/:id/accept', requireAuth, requireRole('volunteer'), async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const { scheduledAt } = req.body; // expect ISO string
+    
+    if (!scheduledAt) {
+      return res.status(400).json({ message: 'scheduledAt is required' });
+    }
+
+    const session = await SessionRequest.findById(sessionId)
+      .populate('student', 'name email')
+      .populate('volunteer', 'name email');
+      
+    if (!session) {
+      return res.status(404).json({ message: 'Session not found' });
+    }
+
+    // Check if the authenticated volunteer owns this request
+    if (String(session.volunteer._id) !== String(req.user._id)) {
+      return res.status(403).json({ message: 'Not allowed' });
+    }
+
+    // Update session status and timestamps
+    session.status = 'accepted';
+    session.scheduledAt = new Date(scheduledAt);
+    session.acceptedAt = new Date();
+    session.updatedAt = new Date();
+    session.sessionRoomId = session.sessionRoomId || `session-${session._id}`;
+    
+    await session.save();
+
+    // Prepare the payload for real-time updates
+    const payload = {
+      sessionId: session._id,
+      status: 'accepted',
+      startAt: session.scheduledAt,
+      sessionRoomId: session.sessionRoomId,
+      session: session.toObject()
+    };
+
+    // Emit update via socket.io to both participants
+    const io = req.app.get('io') || req.app.locals.io;
+    if (io) {
+      // Notify both student and volunteer personal rooms
+      io.to(`user:${String(session.student._id)}`).emit('session:updated', payload);
+      io.to(`user:${String(session.volunteer._id)}`).emit('session:updated', payload);
+    }
+
+    // Schedule server-side "starting" event if scheduler is available
+    if (req.app.get('scheduler')) {
+      req.app.get('scheduler').scheduleSessionStart(session);
+    }
+
+    return res.json({ ok: true, session });
+  } catch (err) {
+    console.error('Error accepting session:', err);
+    return res.status(500).json({ 
+      message: 'Server error', 
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined 
+    });
+  }
+});
+
+// Update session status
 router.put("/:id/status", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -184,57 +249,79 @@ router.put("/:id/status", requireAuth, async (req, res) => {
 
     // ACCEPT / REJECT
     if (status === "accepted" || status === "rejected") {
-      if (sr.status !== "pending" && sr.status !== "accepted") {
-        return res.status(400).json({ message: `Cannot ${status} from status ${sr.status}` });
+      if (!actorIsVolunteer) {
+        return res.status(403).json({ message: "Only volunteer can accept/reject" });
       }
-
-      if (status === "rejected") {
-        sr.status = "rejected";
-      } else {
-        // ACCEPTED
-        if (
-          actorIsVolunteer &&
-          sr.proposed?.date &&
-          sr.proposed?.time
-        ) {
-          const vol = await Volunteer.findOne({ userId }); // keeping existing search key
-          if (!vol) {
+      sr.status = status;
+      if (status === "accepted") {
+        sr.acceptedAt = new Date();
+        
+        // If there's a scheduled time, set up the session start notification
+        if (req.app.get('scheduler') && sr.scheduledAt) {
+          req.app.get('scheduler').scheduleSessionStart(sr);
+        }
+      }
+      
+      // Emit socket event for real-time updates
+      const io = req.app.get('io') || req.app.locals.io;
+      if (io) {
+        const payload = {
+          _id: sr._id,
+          status: sr.status,
+          startAt: sr.scheduledAt,
+          volunteerId: sr.volunteer,
+          studentId: sr.student,
+          sessionRoomId: sr.sessionRoomId
+        };
+        
+        // Notify both student and volunteer
+        io.to(`user:${String(sr.student)}`).emit('session:accepted', payload);
+        io.to(`user:${String(sr.volunteer)}`).emit('session:accepted', payload);
+      }
+    } else {
+      // ACCEPTED
+      if (
+        actorIsVolunteer &&
+        sr.proposed?.date &&
+        sr.proposed?.time
+      ) {
+        const vol = await Volunteer.findOne({ userId }); // keeping existing search key
+        if (!vol) {
+          sr.status = "accepted";
+        } else {
+          const d = (vol.availability || []).find((a) => a.date === sr.proposed.date);
+          if (!d || !d.slots.includes(sr.proposed.time)) {
             sr.status = "accepted";
           } else {
-            const d = (vol.availability || []).find((a) => a.date === sr.proposed.date);
-            if (!d || !d.slots.includes(sr.proposed.time)) {
-              sr.status = "accepted";
-            } else {
-              let zoomLink = null;
-              try {
-                const zoomRes = await createZoomMeetingStub({
-                  topic: sr.subject,
-                  date: sr.proposed.date,
-                  time: sr.proposed.time,
-                });
-                zoomLink = zoomRes?.join_url || zoomRes?.joinUrl || zoomRes?.url || zoomRes?.link || null;
-              } catch (zErr) {
-                console.error("Zoom creation failed (accept auto-schedule):", zErr?.message || zErr);
-                zoomLink = null;
-              }
+            let zoomLink = null;
+            try {
+              const zoomRes = await createZoomMeetingStub({
+                topic: sr.subject,
+                date: sr.proposed.date,
+                time: sr.proposed.time,
+              });
+              zoomLink = zoomRes?.join_url || zoomRes?.joinUrl || zoomRes?.url || zoomRes?.link || null;
+            } catch (zErr) {
+              console.error("Zoom creation failed (accept auto-schedule):", zErr?.message || zErr);
+              zoomLink = null;
+            }
 
-              sr.final = { date: sr.proposed.date, time: sr.proposed.time, zoomLink };
-              sr.status = "scheduled";
+            sr.final = { date: sr.proposed.date, time: sr.proposed.time, zoomLink };
+            sr.status = "scheduled";
 
-              // remove booked slot
-              d.slots = d.slots.filter((s) => s !== sr.proposed.time);
-              await vol.save();
+            // remove booked slot
+            d.slots = d.slots.filter((s) => s !== sr.proposed.time);
+            await vol.save();
 
-              try {
-                await awardBadgesForVolunteer(userId);
-              } catch (badgeErr) {
-                console.warn("awardBadgesForVolunteer failed:", badgeErr?.message || badgeErr);
-              }
+            try {
+              await awardBadgesForVolunteer(userId);
+            } catch (badgeErr) {
+              console.warn("awardBadgesForVolunteer failed:", badgeErr?.message || badgeErr);
             }
           }
-        } else {
-          sr.status = "accepted";
         }
+      } else {
+        sr.status = "accepted";
       }
 
       await sr.save();
@@ -253,7 +340,7 @@ router.put("/:id/status", requireAuth, async (req, res) => {
           finalDate: sr.final?.date || null,
           finalTime: sr.final?.time || null,
           zoomLink: sr.final?.zoomLink || null
-        }
+        },
       });
 
       const populated = await SessionRequest.findById(sr._id)
@@ -270,16 +357,15 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         return res.status(403).json({ message: "Only volunteer can schedule" });
       }
       if (!date || !time) {
-        return res.status(400).json({ message: "date and time required to schedule" });
+        return res.status(400).json({ message: "date and time are required" });
       }
-
-      const vol = await Volunteer.findOne({ userId });
-      if (!vol) return res.status(404).json({ message: "Volunteer profile not found" });
-
-      const day = (vol.availability || []).find((a) => a.date === date);
-      if (!day || !day.slots.includes(time)) {
-        return res.status(400).json({ message: "Selected slot not available" });
-      }
+      
+      // Parse the date and time
+      const [hours, minutes] = time.split(':').map(Number);
+      const startAt = new Date(date);
+      startAt.setHours(hours, minutes, 0, 0);
+      
+      sr.scheduledAt = startAt;
 
       let zoomLink = null;
       try {
@@ -302,6 +388,29 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         console.warn("awardBadgesForVolunteer failed:", badgeErr?.message || badgeErr);
       }
       await sr.save();
+
+      // Emit socket event for real-time updates
+      const io = req.app.get('io') || req.app.locals.io;
+      if (io) {
+        const payload = {
+          _id: sr._id,
+          status: 'scheduled',
+          startAt: sr.scheduledAt.toISOString(),
+          volunteerId: sr.volunteer,
+          studentId: sr.student,
+          sessionRoomId: sr.sessionRoomId,
+          zoomLink: zoomLink
+        };
+        
+        // Notify both student and volunteer
+        io.to(`user:${String(sr.student)}`).emit('session:scheduled', payload);
+        io.to(`user:${String(sr.volunteer)}`).emit('session:scheduled', payload);
+      }
+
+      // Schedule the session start notification
+      if (req.app.get('scheduler')) {
+        req.app.get('scheduler').scheduleSessionStart(sr);
+      }
 
       await Notification.create({
         user: sr.student,
@@ -493,6 +602,7 @@ router.put('/:id/respond', requireAuth, async (req, res) => {
 /**
  * Get all my session requests (as student or volunteer or requester)
  */
+
 router.get("/mine", requireAuth, async (req, res) => {
   try {
     const { id: uid } = getUserFromReq(req);
