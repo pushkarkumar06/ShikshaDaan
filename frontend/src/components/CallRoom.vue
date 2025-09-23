@@ -17,10 +17,10 @@
         <div v-if="Object.keys(remoteStreams).length === 0" class="small">No other peers yet</div>
         <div style="display:flex; gap:12px; flex-wrap:wrap;">
           <VideoTile
-            v-for="(s, id) in remoteStreams"
-            :key="id"
+            v-for="(s, peerId) in remoteStreams"
+            :key="peerId"
             :stream="s.stream"
-            :label="s.label || id"
+            :label="s.label || peerId"
             :muted="false"
             :isActive="true"
           />
@@ -31,231 +31,250 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
-import { io } from 'socket.io-client'
-import VideoTile from './VideoTile.vue'
+import { ref, reactive, onMounted, onBeforeUnmount } from 'vue';
+import { io } from 'socket.io-client';
+import VideoTile from './VideoTile.vue';
 
-// EDIT: set the correct WS_URL for your project (same as chat)
-const WS_URL = 'http://localhost:5000' // <- change if your backend URL differs
-
-// props (roomId passed when mounting this component)
+// Props
 const props = defineProps({
   roomId: { type: String, required: true },
-  userInfo: { type: Object, default: () => ({}) } // optional user meta
-})
+  userInfo: { type: Object, default: () => ({ id: null, name: null }) },
+  wsUrl: { type: String, default: null }, // optional override
+  token: { type: String, default: null }  // optional JWT token
+});
 
-// local refs
-const localVideo = ref(null)
-const localStream = ref(null)
-const localAudioEnabled = ref(true)
-const localVideoEnabled = ref(true)
-const screenSharing = ref(false)
+// defaults
+const WS_URL = props.wsUrl || (window.location.protocol + '//' + window.location.hostname + (window.location.port ? ':' + window.location.port : ''));
 
-// remote streams map: { socketId: { stream, label } }
-const remoteStreams = reactive({})
+// refs
+const localVideo = ref(null);
+const localStream = ref(null);
+const localAudioEnabled = ref(true);
+const localVideoEnabled = ref(true);
+const screenSharing = ref(false);
 
-// peer connections map
-const pcs = {} // socketId -> RTCPeerConnection
+const remoteStreams = reactive({}); // peerId -> { stream, label }
+const pcs = {}; // peerId -> RTCPeerConnection
 
-// socket
-const socket = io(WS_URL, { auth: {} })
+// create socket with optional auth token
+const socket = io(WS_URL, {
+  auth: props.token ? { token: props.token } : {},
+  transports: ['websocket']
+});
 
-// ICE servers: add TURN here if you have one
-const pcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' }
-    // { urls: 'turn:your-turn-server', username: 'u', credential: 'p' }
-  ]
-}
+// simple stun-only config (add TURN in production)
+const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 async function startLocalMedia() {
   try {
-    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-    localStream.value = s
-    if (localVideo.value) localVideo.value.srcObject = s
-    localAudioEnabled.value = s.getAudioTracks().some(t => t.enabled)
-    localVideoEnabled.value = s.getVideoTracks().some(t => t.enabled)
+    const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream.value = s;
+    if (localVideo.value) localVideo.value.srcObject = s;
+    localAudioEnabled.value = s.getAudioTracks().some(t => t.enabled);
+    localVideoEnabled.value = s.getVideoTracks().some(t => t.enabled);
   } catch (e) {
-    console.error('getUserMedia failed', e)
-    alert('Camera / microphone access required for calls.')
+    console.error('getUserMedia failed', e);
+    alert('Camera / microphone access required for calls.');
   }
 }
 
-function createPeerConnection(remoteSocketId) {
-  const pc = new RTCPeerConnection(pcConfig)
+function createPeerConnection(peerId) {
+  if (pcs[peerId]) return pcs[peerId];
+  const pc = new RTCPeerConnection(pcConfig);
 
-  // forward local tracks
+  // add local tracks
   if (localStream.value) {
-    localStream.value.getTracks().forEach(track => pc.addTrack(track, localStream.value))
+    localStream.value.getTracks().forEach(track => pc.addTrack(track, localStream.value));
   }
 
-  // ontrack -> build remote stream
+  // when remote track arrives
   pc.ontrack = (ev) => {
-    const existing = remoteStreams[remoteSocketId]?.stream
-    if (existing) {
-      // append tracks to same MediaStream
-      ev.streams[0].getTracks().forEach(t => existing.addTrack(t))
-      return
+    const ms = ev.streams && ev.streams[0] ? ev.streams[0] : new MediaStream();
+    // if new, set up remoteStreams entry
+    if (!remoteStreams[peerId]) {
+      remoteStreams[peerId] = { stream: ms, label: `peer:${peerId}` };
+    } else {
+      // add tracks to existing stream
+      ev.streams[0].getTracks().forEach(t => remoteStreams[peerId].stream.addTrack(t));
     }
-    // create new stream container
-    const ms = new MediaStream()
-    ev.streams[0].getTracks().forEach(t => ms.addTrack(t))
-    remoteStreams[remoteSocketId] = { stream: ms, label: `peer:${remoteSocketId}` }
-  }
+  };
 
-  // ICE candidates -> send to remote
+  // ICE -> emit to server target peer via room
   pc.onicecandidate = (ev) => {
     if (ev.candidate) {
-      socket.emit('rtc:ice', { to: remoteSocketId, candidate: ev.candidate, roomId: props.roomId })
+      socket.emit('call:ice', { roomId: props.roomId, candidate: ev.candidate, from: myId, to: peerId });
     }
-  }
+  };
 
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
-      // cleanup
-      removePeer(remoteSocketId)
+    const s = pc.connectionState;
+    if (s === 'failed' || s === 'disconnected' || s === 'closed') {
+      removePeer(peerId);
     }
-  }
+  };
 
-  pcs[remoteSocketId] = pc
-  return pc
+  pcs[peerId] = pc;
+  return pc;
 }
 
-function removePeer(id) {
-  const pc = pcs[id]
+function removePeer(peerId) {
+  const pc = pcs[peerId];
   if (pc) {
-    try { pc.close() } catch {}
-    delete pcs[id]
+    try { pc.close(); } catch (e) {}
+    delete pcs[peerId];
   }
-  if (remoteStreams[id]) delete remoteStreams[id]
+  if (remoteStreams[peerId]) delete remoteStreams[peerId];
 }
 
-// Signaling handlers
+// local identity
+const myId = props.userInfo?.id || props.userInfo?.userId || null;
+const myName = props.userInfo?.name || props.userInfo?.userName || 'User';
+
+// SIGNALING: call:* events
 socket.on('connect', () => {
-  console.log('rtc socket connected', socket.id)
-  // join room on connect
-  socket.emit('rtc:join', { roomId: props.roomId, user: props.userInfo || {} })
-})
+  console.log('call socket connected', socket.id);
+  // join the call room as soon as local media started/ready
+  socket.emit('call:join', { roomId: props.roomId, userId: myId || socket.id, name: myName });
+});
 
-socket.on('rtc:peer-joined', async ({ socketId, user }) => {
-  console.log('peer joined', socketId)
-  // create pc and make an offer to the new peer
-  const pc = createPeerConnection(socketId)
+// server notifies when others are ready
+socket.on('call:ready', async ({ peerId, name }) => {
+  // peerId is the other user's id (as sent by their client)
+  if (!peerId || peerId === (myId || socket.id)) return;
+  console.log('call:ready from', peerId, name);
+
+  // create PC and offer
+  const pc = createPeerConnection(peerId);
   try {
-    const offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
-    socket.emit('rtc:offer', { to: socketId, sdp: offer, roomId: props.roomId })
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('call:offer', { roomId: props.roomId, to: peerId, offer, from: myId || socket.id });
   } catch (e) {
-    console.error('offer failed', e)
+    console.error('create/send offer failed', e);
   }
-})
+});
 
-socket.on('rtc:offer', async ({ from, sdp }) => {
-  console.log('recv offer from', from)
-  const pc = pcs[from] || createPeerConnection(from)
+// incoming offer (from peer through room)
+socket.on('call:offer', async ({ from, offer }) => {
+  if (!from || from === (myId || socket.id)) return;
+  console.log('received offer from', from);
+  const pc = createPeerConnection(from);
   try {
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp))
-    const answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    socket.emit('rtc:answer', { to: from, sdp: answer, roomId: props.roomId })
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('call:answer', { roomId: props.roomId, answer, from: myId || socket.id });
   } catch (e) {
-    console.error('handle offer failed', e)
+    console.error('handle offer failed', e);
   }
-})
+});
 
-socket.on('rtc:answer', async ({ from, sdp }) => {
-  console.log('recv answer from', from)
-  const pc = pcs[from]
-  if (!pc) return console.warn('pc missing for', from)
+// incoming answer broadcasted in room (note: server emits to room)
+socket.on('call:answer', async ({ from, answer }) => {
+  if (!from || from === (myId || socket.id)) return;
+  const pc = pcs[from];
+  if (!pc) return console.warn('no pc for answer from', from);
   try {
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp))
-  } catch (e) { console.error(e) }
-})
-
-socket.on('rtc:ice', async ({ from, candidate }) => {
-  const pc = pcs[from]
-  if (!pc) return
-  try {
-    await pc.addIceCandidate(candidate)
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
   } catch (e) {
-    console.warn('addIce failed', e)
+    console.error('setRemoteDescription(answer) failed', e);
   }
-})
+});
 
-socket.on('rtc:peer-left', ({ socketId }) => {
-  console.log('peer left', socketId)
-  removePeer(socketId)
-})
+// ICE candidates from others
+socket.on('call:ice', async ({ from, candidate }) => {
+  if (!from || from === (myId || socket.id)) return;
+  const pc = pcs[from];
+  if (!pc) return;
+  try {
+    await pc.addIceCandidate(candidate);
+  } catch (e) {
+    console.warn('addIceCandidate failed', e);
+  }
+});
+
+// someone left
+socket.on('call:leave', ({ userId }) => {
+  const pid = userId || null;
+  if (!pid) return;
+  removePeer(pid);
+});
 
 // UI actions
 function toggleAudio() {
-  if (!localStream.value) return
-  const t = localStream.value.getAudioTracks()[0]
-  if (!t) return
-  t.enabled = !t.enabled
-  localAudioEnabled.value = t.enabled
+  if (!localStream.value) return;
+  const t = localStream.value.getAudioTracks()[0];
+  if (!t) return;
+  t.enabled = !t.enabled;
+  localAudioEnabled.value = t.enabled;
 }
+
 function toggleVideo() {
-  if (!localStream.value) return
-  const t = localStream.value.getVideoTracks()[0]
-  if (!t) return
-  t.enabled = !t.enabled
-  localVideoEnabled.value = t.enabled
+  if (!localStream.value) return;
+  const t = localStream.value.getVideoTracks()[0];
+  if (!t) return;
+  t.enabled = !t.enabled;
+  localVideoEnabled.value = t.enabled;
 }
 
 async function toggleScreenShare() {
   if (screenSharing.value) {
-    // stop screen sharing: replace sender track with camera track
-    stopScreenShare()
-    return
+    stopScreenShare();
+    return;
   }
   try {
-    const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true })
-    const screenTrack = screenStream.getVideoTracks()[0]
+    const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const screenTrack = screenStream.getVideoTracks()[0];
     // replace each pc video sender
     Object.values(pcs).forEach(pc => {
-      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video')
-      if (sender) sender.replaceTrack(screenTrack)
-    })
-    screenSharing.value = true
-    // when screen sharing stops -> revert to camera
-    screenTrack.onended = () => stopScreenShare()
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) sender.replaceTrack(screenTrack);
+    });
+    screenSharing.value = true;
+    screenTrack.onended = () => stopScreenShare();
   } catch (e) {
-    console.error('screen share failed', e)
+    console.error('screen share failed', e);
   }
 }
 
 function stopScreenShare() {
-  if (!localStream.value) return
-  const camTrack = localStream.value.getVideoTracks()[0]
+  if (!localStream.value) return;
+  const camTrack = localStream.value.getVideoTracks()[0];
   Object.values(pcs).forEach(pc => {
-    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video')
-    if (sender && camTrack) sender.replaceTrack(camTrack)
-  })
-  screenSharing.value = false
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+    if (sender && camTrack) sender.replaceTrack(camTrack);
+  });
+  screenSharing.value = false;
 }
 
 function leave() {
-  // inform server and cleanup
-  socket.emit('rtc:leave', { roomId: props.roomId })
-  for (const id of Object.keys(pcs)) removePeer(id)
+  try {
+    socket.emit('call:leave', { roomId: props.roomId, userId: myId || socket.id });
+  } catch (e) { /* ignore */ }
+
+  // cleanup peers
+  Object.keys(pcs).forEach(id => removePeer(id));
+
+  // stop local tracks
   if (localStream.value) {
-    localStream.value.getTracks().forEach(t => t.stop())
-    localStream.value = null
+    localStream.value.getTracks().forEach(t => t.stop());
+    localStream.value = null;
   }
-  if (localVideo.value) localVideo.value.srcObject = null
+  if (localVideo.value) localVideo.value.srcObject = null;
+
+  try { socket.disconnect(); } catch (e) {}
 }
 
 // lifecycle
 onMounted(async () => {
-  await startLocalMedia()
-  // joining happens when socket connects (see above)
-})
+  await startLocalMedia();
+  // join call room after local media ready
+  socket.emit('call:join', { roomId: props.roomId, userId: myId || socket.id, name: myName });
+});
 
 onBeforeUnmount(() => {
-  leave()
-  try { socket.disconnect() } catch {}
-})
+  leave();
+});
 </script>
 
 <style scoped>

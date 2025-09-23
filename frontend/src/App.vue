@@ -541,15 +541,27 @@
     <div v-if="r.proposed">Proposed: {{ r.proposed.date }} {{ r.proposed.time }}</div>
     <div v-if="r.final">Final: {{ r.final.date }} {{ r.final.time }} — <a :href="r.final.zoomLink" target="_blank">Join</a></div>
     <div class="row" style="margin-top:10px; gap:6px">
-      <button v-if="user && (String(user._id) === String(r.volunteer._id) || String(user._id) === String(r.student._id)) && r.status==='pending'" @click="acceptSession(r)">Accept</button>
-      <button v-if="user && (String(user._id) === String(r.volunteer._id) || String(user._id) === String(r.student._id)) && r.status==='pending'" class="ghost" @click="respondToRequest(r._id, 'rejected')">Reject</button>
+      <!-- Show Accept/Reject buttons only when request is pending, user is a participant, and both student and volunteer exist -->
+      <button 
+        v-if="user && r.status === 'pending' && r.student && r.volunteer && (String(user._id) === String(r.volunteer._id || r.volunteer) || String(user._id) === String(r.student._id || r.student))" 
+        @click="acceptSession(r)">
+        Accept
+      </button>
+      <button 
+        v-if="user && r.status === 'pending' && r.student && r.volunteer && (String(user._id) === String(r.volunteer._id || r.volunteer) || String(user._id) === String(r.student._id || r.student))" 
+        class="ghost" 
+        @click="respondToRequest(r._id, 'rejected')">
+        Reject
+      </button>
+      
+      <!-- Always show chat button -->
       <button @click="openChatForSession(r)">Open Chat</button>
-      <!-- Volunteer scheduling UI (keep as-is if needed) -->
-      <div
-        v-if="user && user.role === 'volunteer' && String(r.volunteer?._id||r.volunteer)===String(user._id) && r.status !== 'scheduled'"
+      
+      <!-- Volunteer scheduling UI - only show when request is pending, user is the volunteer, and both student and volunteer exist -->
+      <div 
+        v-if="user && user.role === 'volunteer' && r.student && r.volunteer && String(r.volunteer._id || r.volunteer) === String(user._id) && r.status === 'pending'"
         class="row"
-        style="gap:6px"
-      >
+        style="gap:6px">
         <input v-model="acceptDate" placeholder="YYYY-MM-DD" />
         <input v-model="acceptTime" placeholder="HH:mm" />
         <button @click="acceptRequest(r._id)">Accept & Schedule</button>
@@ -660,18 +672,15 @@
                  style="margin-top:10px; height:320px; overflow:auto; border:1px solid #e2e8f0; border-radius:10px; padding:10px; background:#f7f9fc;">
               <div v-for="m in messages" :key="m._id" :style="{ display:'flex', justifyContent: (String(m.sender)===String(user?._id)) ? 'flex-end':'flex-start' }">
                 <div :style="{
-                      maxWidth:'78%',
-                      padding:'8px 12px',
-                      margin:'6px',
-                      borderRadius:'14px',
-                      background: (String(m.sender)===String(user?._id)) ? '#d1fadf' : '#ffffff',
-                      border: '1px solid #e6eef7',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
+                      maxWidth: '78%',
+                      padding: '8px 12px',
+                      borderRadius: '12px',
+                      backgroundColor: (String(m.sender)===String(user?._id)) ? '#e3f2fd' : '#f1f1f1',
+                      margin: '4px 0',
+                      wordBreak: 'break-word'
                     }">
-
-                  <!-- text -->
-                  <div v-if="m.text">{{ m.text }}</div>
-
+                  {{ m.text || '' }}
+                  
                   <!-- attachments -->
                   <div v-if="m.attachments && m.attachments.length" style="margin-top:6px">
                     <div v-for="(att,idx) in m.attachments" :key="idx" style="margin-top:6px">
@@ -684,7 +693,10 @@
                       </template>
                       <template v-else>
                         <a :href="fileURL(att.url)" target="_blank" class="small">Download: {{ att.name }}</a>
-                        <div class="small" style="opacity:.7">{{ att.mime }} • {{ (att.size/1024).toFixed(1) }} KB</div>
+                        <div class="small" style="opacity:.7">
+  {{ att.mime }} • {{ (att.size/1024).toFixed(1) + ' KB' }}
+</div>
+
                       </template>
                     </div>
                   </div>
@@ -705,7 +717,9 @@
               <div class="row" style="flex-wrap:wrap; gap:8px; margin-top:6px">
                 <div v-for="(a,i) in pendingUploads" :key="i" class="card tiny">
                   <div class="small">{{ a.name }}</div>
-                  <div class="small" style="opacity:.7">{{ (a.size/1024).toFixed(1) }} KB</div>
+                  <div class="small" style="opacity:.7">{{ formatSize(a.size) }}</div>
+
+
                   <div class="small">{{ a.mime }}</div>
                 </div>
               </div>
@@ -824,7 +838,7 @@
       <VolunteerProfile
         :profile="selectedProfile"
         :reviews="currentProfileReviews"
-        @start-call="(payload) => $emit('start-call', payload)"
+        @start-call="startVideoCall"
       />
     </div>
 
@@ -892,7 +906,6 @@ import CallRoom from './components/CallRoom.vue'
 
 
 const API = 'http://localhost:5000/api'
-const WS_URL = 'http://localhost:5000'
 
 // ---------- auth state ----------
 const token = ref(localStorage.getItem('token') || '')
@@ -1073,6 +1086,16 @@ function fileURL(u) {
   return /^https?:\/\//i.test(u) ? u : `${WS_URL}${u}`
 }
 
+// human-friendly file size (KB)
+const formatSize = (sizeInBytes) => {
+  try {
+    const s = Number(sizeInBytes) || 0;
+    return (s / 1024).toFixed(1) + ' KB';
+  } catch {
+    return '0 KB';
+  }
+};
+
 // Explore card – accept both shapes (profilePicture|avatar)
 function volPhoto(v) {
   return v.photoUrl
@@ -1088,46 +1111,45 @@ const notifUnread = computed(() =>
 
 // === Helpers to know if current user is the RECEIVER of a request ===
 function amReceiver(r) {
-  if (!user.value) return false
-  const me = String(user.value._id)
-  const isPending = r.status === 'pending'
-  if (user.value.role === 'volunteer') {
-    return isPending && String(r.volunteer?._id || r.volunteer) === me
+  try {
+    if (!r || !user.value) return false;
+    const myId = String(user.value._id);
+    const senderId = r.requestedBy?._id ? String(r.requestedBy._id) : null;
+    const receiverId = r.receiver?._id ? String(r.receiver._id) : null;
+    return (receiverId === myId) || (senderId !== myId && r.volunteer?._id === myId);
+  } catch (e) {
+    console.warn('amReceiver error:', e);
+    return false;
   }
-  if (user.value.role === 'student') {
-    return isPending && String(r.student?._id || r.student) === me
-  }
-  return false
 }
-const canAccept = (r) => amReceiver(r)
-const canReject = (r) => amReceiver(r)
 
-// === Accept / Reject action (replace any existing respondToRequest)
+const canAccept = (r) => amReceiver(r) && r.status === 'pending';
+const canReject = (r) => amReceiver(r) && r.status === 'pending';
+
+// Unified request response handler
 async function respondToRequest(rOrId, action) {
   try {
     if (!['accepted','rejected'].includes(action)) return;
     if (!user.value) return alert('Login first');
 
-    // accept both shapes: object { _id } or plain id string
     const requestId = typeof rOrId === 'string' ? rOrId : (rOrId && (rOrId._id || rOrId.id));
-    if (!requestId) {
-      console.error('respondToRequest: missing request id', rOrId);
-      return alert('Cannot perform action. Missing session id.');
-    }
+    if (!requestId) return alert('Cannot perform action: missing id');
 
-    if (user.value.role === 'volunteer') {
-      await api(`/sessions/${requestId}/status`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: action })
+    if (action === 'accepted') {
+      // Use the accept endpoint for accepting requests
+      await api(`/sessions/${requestId}/accept`, { 
+        method: 'POST',
+        body: JSON.stringify({}) 
       });
-    } else if (user.value.role === 'student') {
-      // backend tiny endpoint that lets the receiver student accept/reject
-      await api(`/sessions/${requestId}/respond`, {
-        method: 'PUT',
-        body: JSON.stringify({ action })   // 'accepted' | 'rejected'
+    } else {
+      // Use the respond endpoint for rejecting requests (backend expects POST)
+      await api(`/sessions/${requestId}/respond`, { 
+        method: 'POST',
+        body: JSON.stringify({ action: 'rejected' }) 
       });
     }
 
+    // Refresh the UI
     await loadMyRequests();
     await loadNotifications();
     alert(`Request ${action}.`);
@@ -1138,6 +1160,8 @@ async function respondToRequest(rOrId, action) {
 }
 
 async function handleReviewSubmitted(reviewData) {
+  if (!selectedProfile.value) return { success: false, error: 'No profile selected' };
+  
   try {
     // Assuming your API expects { volunteerId, rating, comment }
     const response = await api('/reviews', {
@@ -1162,21 +1186,55 @@ async function handleReviewSubmitted(reviewData) {
   }
 }
 
-// acceptSession -> replaces any axios-based implementation
-async function acceptSession(session) {
-  console.log("session used for accept:", session);
-  const id = session?._id || session?.id;
+// Handle both student and volunteer accept flows
+// sessionOrId can be either a session object or a session ID string
+async function acceptSession(sessionOrId) {
+  const sessionObj = (typeof sessionOrId === 'string') ? null : sessionOrId;
+  const id = (typeof sessionOrId === 'string') ? sessionOrId : (sessionOrId && (sessionOrId._id || sessionOrId.id));
+
   if (!id) {
-    console.error("acceptSession: missing session id", session);
+    console.error("acceptSession: missing session id", sessionOrId);
     alert("Cannot accept. Session id missing.");
     return;
   }
 
   try {
-    // reuse respondToRequest that uses api() and correct base URL + auth
-    await respondToRequest(id, 'accepted');
+    // If we already have the session object, use that to decide quickly
+    let isStudentActor = false;
+    if (sessionObj) {
+      const studentId = String(sessionObj.student?._id || sessionObj.student || '');
+      isStudentActor = user.value && String(user.value._id) === studentId;
+    } else {
+      // Fetch session to decide which endpoint student/volunteer should use
+      const sr = await api(`/sessions/mine` , { method: 'GET' });
+      // NOTE: If you have a /sessions/:id GET endpoint, use that instead:
+      // const sr = await api(`/sessions/${id}` , { method: 'GET' });
+      // but if you don't have it, fallback to loadMyRequests then find the item
+      const found = (myRequests.value || []).find(r => String(r._id) === id);
+      if (found) {
+        const studentId = String(found.student?._id || found.student || '');
+        isStudentActor = user.value && String(user.value._id) === studentId;
+      } else {
+        // Safe fallback: call respond endpoint, backend will validate. We'll assume student cannot call /accept.
+        isStudentActor = (user.value && user.value.role === 'student');
+      }
+    }
 
-    // refresh UI
+    if (isStudentActor) {
+      // Students should use /respond for student-side accepts
+      await api(`/sessions/${id}/respond` , {
+        method: 'POST',
+        body: JSON.stringify({ action: 'accepted' })
+      });
+    } else {
+      // Volunteers/admin use the accept endpoint (can schedule too)
+      await api(`/sessions/${id}/accept`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+    }
+
+    // Refresh the UI
     await loadMyRequests();
     await loadNotifications();
   } catch (err) {
@@ -1628,37 +1686,23 @@ async function acceptRequest(requestId) {
     if (!acceptDate.value || !acceptTime.value) {
       return alert('Please select both date and time for the session');
     }
+
+    // Combine date and time into ISO string for the backend
+    const scheduledAt = new Date(`${acceptDate.value}T${acceptTime.value}`).toISOString();
     
-    const body = { 
-      date: acceptDate.value, 
-      time: acceptTime.value,
-      scheduledAt: new Date(`${acceptDate.value}T${acceptTime.value}:00`).toISOString()
-    };
-    
-    const data = await api(`/sessions/${requestId}/accept`, { 
-      method: 'POST', 
-      body: JSON.stringify(body) 
+    // Call the accept endpoint with the scheduled time
+    await api(`/sessions/${requestId}/accept`, {
+      method: 'POST',
+      body: JSON.stringify({ scheduledAt })
     });
-    
-    lastResponse.value = JSON.stringify(data, null, 2);
-    
-    // Update the local state immediately for better UX
-    const requestIndex = myRequests.value.findIndex(r => r._id === requestId);
-    if (requestIndex !== -1) {
-      myRequests.value[requestIndex] = {
-        ...myRequests.value[requestIndex],
-        status: 'accepted',
-        scheduledAt: body.scheduledAt,
-        startAt: body.scheduledAt
-      };
-    } else {
-      await loadMyRequests();
-    }
-    
-    alert(`Session accepted and scheduled for ${new Date(body.scheduledAt).toLocaleString()}`);
-  } catch (e) { 
+
+    // Refresh the UI
+    await loadMyRequests();
+    await loadNotifications();
+    alert(`Session accepted and scheduled for ${new Date(scheduledAt).toLocaleString()}`);
+  } catch (e) {
     console.error('Error accepting request:', e);
-    alert(e.message || 'Failed to accept session request'); 
+    alert(e.message || 'Failed to accept session request');
   }
 }
 
@@ -1823,90 +1867,173 @@ async function loadDashboard() {
 }
 
 // ======== CHAT LOGIC ========
+const WS_URL = import.meta.env.VITE_WS_URL || 'http://localhost:5000';
+
 function connectSocket() {
-  if (!token.value) return
-  if (socket.value) socket.value.disconnect()
+  // Disconnect existing socket if any
+  if (socket.value) {
+    socket.value.off(); // Remove all event listeners
+    socket.value.disconnect();
+    socket.value = null;
+  }
 
-  socket.value = io(WS_URL, { auth: { token: token.value } })
+  // Get fresh token from localStorage
+  const storedToken = localStorage.getItem('token');
+  if (!storedToken) {
+    console.warn('No auth token found for WebSocket');
+    return;
+  }
 
-  // Chat related events
-  socket.value.on("conversations:updated", () => { loadConversations() })
+  console.log('Connecting to WebSocket...');
 
-  socket.value.on("message:new", async ({ conversationId, message }) => {
-    if (activeConv.value && activeConv.value._id === conversationId) {
-      messages.value = [ ...messages.value, message ]
-      await nextTick()
-      scrollToBottom()
-      markConversationRead(conversationId)
-    } else {
-      loadConversations()
+  socket.value = io(WS_URL, {
+    transports: ['websocket', 'polling'],
+    auth: { token: storedToken },
+    reconnectionAttempts: 5,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 10000,
+    timeout: 15000,
+    forceNew: true,
+    autoConnect: true
+  });
+
+  // --- connection lifecycle ---
+  socket.value.on('connect', () => {
+    console.log('✅ WebSocket connected with ID:', socket.value.id);
+    socket.value.emit('authenticate', { token: storedToken });
+  });
+
+  socket.value.on('disconnect', (reason) => {
+    console.warn('❌ WebSocket disconnected:', reason);
+    if (reason === 'io server disconnect') {
+      setTimeout(() => socket.value.connect(), 1000);
     }
-  })
+  });
 
-  // Session related events
-  socket.value.on('session:accepted', async (updatedRequest) => {
-    // Update the request in the myRequests array if it exists
-    const requestIndex = myRequests.value.findIndex(r => r._id === updatedRequest._id)
-    if (requestIndex !== -1) {
-      // Preserve existing properties while updating with new ones
-      myRequests.value[requestIndex] = { 
-        ...myRequests.value[requestIndex], 
-        ...updatedRequest,
-        status: 'accepted',
-        scheduledAt: updatedRequest.startAt || myRequests.value[requestIndex].scheduledAt
+  socket.value.on('reconnect_attempt', (attempt) => {
+    console.log(`🔁 Reconnection attempt ${attempt}/5`);
+  });
+  
+  socket.value.on('reconnect_failed', () => console.error('❌ WebSocket reconnection failed'));
+  
+  socket.value.on('connect_error', (error) => console.error('WebSocket connection error:', error?.message || error));
+  
+  socket.value.on('auth_error', (error) => {
+    console.error('WebSocket authentication failed:', error?.message || error);
+    // prefer logout flow instead of forcing pathname change
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    token.value = '';
+    user.value = null;
+    // optionally: switch to auth tab
+    tab.value = 'auth';
+  });
+
+  // --- session events ---
+  socket.value.on('session:update', (updatedSession) => {
+    console.log('📝 Session updated:', updatedSession?._id);
+    updateSessionInList(updatedSession);
+    if (user.value &&
+        (updatedSession.student?._id === user.value._id ||
+         updatedSession.volunteer?._id === user.value._id ||
+         updatedSession.requestedBy?._id === user.value._id)) {
+      loadNotifications();
+    }
+  });
+
+  socket.value.on('notification:new', (notification) => {
+    console.log('🔔 New notification:', notification?.type);
+    loadNotifications();
+  });
+
+  socket.value.on('session:request', (session) => {
+    console.log('📨 New session request:', session?._id);
+    loadMyRequests();
+    loadNotifications();
+  });
+
+  socket.value.on('session:accepted', async (payload) => {
+    try {
+      console.debug('socket session:accepted', payload);
+      const sessionObj = payload?.session || payload;
+      const id = String(sessionObj._id || sessionObj.requestId || payload?._id);
+      if (!id) { await loadMyRequests(); return; }
+      const idx = myRequests.value.findIndex(r => String(r._id) === id);
+      if (idx !== -1) {
+        myRequests.value[idx] = { ...myRequests.value[idx], ...sessionObj, status: 'accepted' };
+      } else {
+        await loadMyRequests();
       }
-    } else {
-      // If not found, reload the requests to get the latest state
-      await loadMyRequests()
-    }
-    
-    // Show a notification if the current user is the student
-    if (user.value && user.value._id === updatedRequest.studentId) {
-      alert(`Your session request has been accepted! ${updatedRequest.startAt ? `Scheduled for ${new Date(updatedRequest.startAt).toLocaleString()}` : ''}`)
-    }
-    }
-  })
+      loadNotifications();
+    } catch (e) { console.error('Error handling session:accepted event:', e); }
+  });
 
-  // Handle session scheduled events
-  socket.value.on('session:scheduled', (sessionData) => {
-    // Update the request in the myRequests array if it exists
-    const requestIndex = myRequests.value.findIndex(r => r._id === sessionData._id)
-    if (requestIndex !== -1) {
-      myRequests.value[requestIndex] = { 
-        ...myRequests.value[requestIndex],
-        ...sessionData,
-        status: 'scheduled',
-        scheduledAt: sessionData.startAt
+  socket.value.on('session:rejected', async (payload) => {
+    try {
+      console.debug('socket session:rejected', payload);
+      const sessionObj = payload?.session || payload;
+      const id = String(sessionObj._id || sessionObj.requestId || payload?._id);
+      if (!id) { await loadMyRequests(); return; }
+      const idx = myRequests.value.findIndex(r => String(r._id) === id);
+      if (idx !== -1) {
+        myRequests.value[idx] = { ...myRequests.value[idx], ...sessionObj, status: 'rejected' };
+      } else {
+        await loadMyRequests();
       }
-    }
-    
-    // Show notification if current user is a participant
-    if (user.value && 
-        (user.value._id === sessionData.studentId || user.value._id === sessionData.volunteerId)) {
-      const sessionTime = new Date(sessionData.startAt).toLocaleString()
-      alert(`Session scheduled for ${sessionTime}`)
-    }
-  })
+      loadNotifications();
+    } catch (e) { console.error('Error handling session:rejected event:', e); }
+  });
 
-  // Handle session starting soon notification
-  socket.value.on('session:starting', (session) => {
-    if (user.value) {
-      const isParticipant = user.value._id === session.studentId || 
-                          user.value._id === session.volunteerId
-      
-      if (isParticipant) {
-        const joinLink = session.zoomLink || session.joinLink || '#'
-        const message = `Session is about to start! Join now to begin your ${session.subject || ''} session.`
-        
-        // Show a more informative alert with a clickable link if available
-        if (confirm(message + '\n\nClick OK to join now')) {
-          if (joinLink && joinLink !== '#') {
-            window.open(joinLink, '_blank')
-          }
+  socket.value.on('session:scheduled', async (payload) => {
+    try {
+      console.debug('socket session:scheduled', payload);
+      if (payload?.session?._id) updateSessionInList(payload.session);
+      else await loadMyRequests();
+      if (user.value) {
+        const isParticipant = String(user.value._id) === String(payload?.studentId) || String(user.value._id) === String(payload?.volunteerId);
+        if (isParticipant) {
+          const sessionTime = new Date(payload?.startAt || payload?.scheduledAt || Date.now());
+          alert(`✅ session scheduled for ${sessionTime.toLocaleString()}`);
         }
       }
+    } catch (e) { console.error('session:scheduled handler failed', e); await loadMyRequests(); }
+  });
+
+  socket.value.on('session:starting', (session) => {
+    try {
+      if (!user.value) return;
+      const isParticipant = String(user.value._id) === String(session?.studentId) || String(user.value._id) === String(session?.volunteerId);
+      if (!isParticipant) return;
+      const joinLink = session.zoomLink || session.joinLink || '#';
+      const subject = session.subject || '';
+      const startTime = session.startAt ? new Date(session.startAt).toLocaleTimeString() : 'soon';
+      if (confirm(`Your ${subject ? subject + ' ' : ''}session is about to start ${startTime}.\n\nClick OK to join now.`)) {
+        if (joinLink && joinLink !== '#') window.open(joinLink, '_blank');
+        else alert('No join link available.');
+      }
+    } catch (e) { console.error('Error in session:starting handler:', e); }
+  });
+
+  // --- chat events (message etc) ---
+  socket.value.on('message:new', async ({ conversationId, message } = {}) => {
+    // optional: if activeConv matches, push message; else mark conversation updated
+    if (activeConv.value && String(activeConv.value._id) === String(conversationId)) {
+      messages.value.push(message);
+      await nextTick(); 
+      scrollToBottom();
+    } else {
+      await loadConversations();
     }
-  })
+  });
+
+  socket.value.on('conversations:updated', async () => { 
+    await loadConversations(); 
+  });
+  
+  socket.value.on('conversation:typing', ({ conversationId, userId, isTyping } = {}) => { 
+    // Handle typing indicator if needed
+    console.log(`User ${userId} is ${isTyping ? 'typing' : 'not typing'} in conversation ${conversationId}`);
+  });
 }
 
 async function loadConversations() {
@@ -1960,7 +2087,10 @@ async function startChatWith(targetUserId) {
 
 // open chat from session -> also route to the SAME 1:1 DM
 async function openChatForSession(req) {
-  const otherId = (String(req.volunteer) === String(user.value._id)) ? req.target : req.volunteer
+  const candidate = (String(req.volunteer) === String(user.value._id)) ? (req.student) : (req.volunteer);
+  const otherId = candidate && (candidate._id || candidate) ? String(candidate._id || candidate) : null;
+  if (!otherId) return alert('Cannot open chat: other participant id missing on session');
+  
   const conv = await api('/chat/conversations/open', {
     method: 'POST',
     body: JSON.stringify({ userId: otherId }) // <- IMPORTANT: no sessionRequestId
@@ -1999,6 +2129,18 @@ function scrollToBottom() {
   const el = scrollBox.value
   if (!el) return
   el.scrollTop = el.scrollHeight
+}
+
+// keep myRequests in sync when sockets send session updates
+function updateSessionInList(updated) {
+  if (!updated || !updated._id) return;
+  const id = String(updated._id);
+  const idx = myRequests.value.findIndex(r => String(r._id) === id);
+  if (idx !== -1) {
+    myRequests.value[idx] = { ...myRequests.value[idx], ...updated };
+  } else {
+    myRequests.value.unshift(updated); // add new updates at top
+  }
 }
 
 // Handle starting a video call with a user
@@ -2218,5 +2360,3 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 }
 
 </style>
-
-

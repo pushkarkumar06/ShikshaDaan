@@ -4,6 +4,7 @@
       v-if="inCall"
       :roomId="activeRoomId || profile.userId"
       :userInfo="{ name: profile.name, photoUrl: profile.photoUrl, userId: profile.userId }"
+      :token="jwtToken"
       @leave="leaveCall"
     />
 
@@ -41,7 +42,10 @@
         <div style="flex:1; min-width:260px">
           <h3>Actions</h3>
           <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom: 12px;">
-            <button @click="onStartCall" class="primary">Start Video Call</button>
+            <button @click="onStartCall" class="primary" :disabled="starting">
+              <span v-if="!starting">Start Video Call</span>
+              <span v-else>Starting…</span>
+            </button>
             <button @click="$emit('message', profile.userId)" class="secondary">Message</button>
             <button @click="$emit('follow', profile.userId)" class="secondary">Follow</button>
           </div>
@@ -69,7 +73,18 @@ export default {
     return {
       inCall: false,
       activeRoomId: "",
+      starting: false,
     };
+  },
+  computed: {
+    // If you store JWT in localStorage/sessionStorage, CallRoom will accept token prop.
+    jwtToken() {
+      try {
+        return localStorage.getItem("token") || null;
+      } catch {
+        return null;
+      }
+    }
   },
   methods: {
     formatDate(d) {
@@ -79,11 +94,50 @@ export default {
         return d;
       }
     },
-    onStartCall() {
-      // Ask parent to start room / signaling; parent should listen to 'start-call'
-      this.$emit("start-call", { target: this.profile.userId, profile: this.profile });
-      this.inCall = true;
+
+    // Create a room on server and join it
+    async onStartCall() {
+      // prevent double clicks
+      if (this.starting) return;
+      this.starting = true;
+
+      try {
+        // POST /api/rtc/room { target } (server creates a UUID room and optionally notifies target)
+        const res = await fetch("/api/rtc/room", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            // send credentials (cookie) if your auth uses cookies
+            // token in Authorization header if you use JWT
+            ...(this.jwtToken ? { Authorization: `Bearer ${this.jwtToken}` } : {}),
+          },
+          body: JSON.stringify({ target: this.profile.userId }),
+          credentials: "include",
+        });
+
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          console.error("Create room failed", res.status, txt);
+          alert("Unable to create call room. Try again.");
+          this.starting = false;
+          return;
+        }
+
+        const data = await res.json();
+        // expect { roomId, room }
+        this.activeRoomId = data?.roomId || data?.room?.roomId || `call-${Date.now()}`;
+        this.inCall = true;
+
+        // Emit event upwards so parent can track telemetries/notifications if needed
+        this.$emit("started-call", { roomId: this.activeRoomId, target: this.profile.userId });
+      } catch (err) {
+        console.error("onStartCall error", err);
+        alert("Could not start call — check network / permissions.");
+      } finally {
+        this.starting = false;
+      }
     },
+
     leaveCall() {
       this.inCall = false;
       this.activeRoomId = "";
@@ -114,6 +168,10 @@ button.primary {
 }
 button.primary:hover {
   background-color: #2563eb;
+}
+button.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 button.secondary {
   background-color: #e2e8f0;

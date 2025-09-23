@@ -12,7 +12,7 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref, watch } from "vue";
+import { onMounted, onBeforeUnmount, ref, watch, nextTick } from "vue";
 
 const props = defineProps({
   stream: { type: Object, default: null },
@@ -26,21 +26,35 @@ const emit = defineEmits(["toggle-mute", "toggle-video"]);
 
 const v = ref(null);
 
+async function attachStream(s) {
+  await nextTick();
+  if (!v.value) return;
+  try {
+    v.value.srcObject = s || null;
+  } catch (e) {
+    // fallback: set srcObject via Object.defineProperty if browser blocks
+    try {
+      v.value.srcObject = null;
+      v.value.src = "";
+    } catch {}
+  }
+}
+
 onMounted(() => {
-  if (v.value && props.stream) v.value.srcObject = props.stream;
+  attachStream(props.stream);
 });
 
 watch(
   () => props.stream,
   (s) => {
-    if (v.value) {
-      v.value.srcObject = s || null;
-    }
+    attachStream(s);
   }
 );
 
 onBeforeUnmount(() => {
-  if (v.value) v.value.srcObject = null;
+  if (v.value) {
+    try { v.value.srcObject = null; } catch {}
+  }
 });
 </script>
 

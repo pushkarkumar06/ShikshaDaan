@@ -1,10 +1,11 @@
 <template>
   <div>
-    <!-- CallRoom shown when inCall; parent may provide CallRoom via slot/prop or listen to events -->
+    <!-- CallRoom shown when inCall -->
     <CallRoom
       v-if="inCall"
       :roomId="activeRoomId || profile.userId"
       :userInfo="{ name: profile.name, photoUrl: profile.photoUrl, userId: profile.userId }"
+      :token="jwtToken"
       @leave="leaveCall"
     />
 
@@ -26,7 +27,10 @@
           <div class="small">Hourly: {{ profile.hourlyRate ? '₹' + profile.hourlyRate + '/hr' : '—' }}</div>
 
           <div style="margin-top: 12px; display: flex; gap: 8px;">
-            <button @click="onStartCall" class="primary">Start Video Call</button>
+            <button @click="onStartCall" class="primary" :disabled="starting">
+              <span v-if="!starting">Start Video Call</span>
+              <span v-else>Starting…</span>
+            </button>
             <button @click="$emit('message', profile.userId)" class="secondary">Message</button>
             <button v-if="canFollow" @click="$emit('follow', profile.userId)" class="secondary">Follow</button>
           </div>
@@ -84,7 +88,18 @@ export default {
     return {
       inCall: false,
       activeRoomId: "",
+      starting: false,
     };
+  },
+  computed: {
+    // Adjust based on how you store auth (cookie vs localStorage token)
+    jwtToken() {
+      try {
+        return localStorage.getItem("token") || null;
+      } catch {
+        return null;
+      }
+    }
   },
   methods: {
     formatDate(d) {
@@ -94,19 +109,44 @@ export default {
         return d;
       }
     },
-    /**
-     * onStartCall:
-     * - emits 'start-call' with target userId (parent should create room via /api/rtc/room and return roomId)
-     * - parent can then set activeRoomId via a prop or call a function; here we optimistically set inCall and let parent handle signaling
-     */
-    async onStartCall() {
-      // Inform parent to start/create room and handle signaling
-      // Parent should listen to 'start-call' and respond by calling /api/rtc/room and optionally returning roomId via an event or by updating a reactive prop.
-      this.$emit("start-call", { target: this.profile.userId, profile: this.profile });
 
-      // Set local inCall = true so CallRoom shows (parent can also manage this state)
-      this.inCall = true;
+    // Create a room on the server and join it
+    async onStartCall() {
+      if (this.starting) return;
+      this.starting = true;
+
+      try {
+        const res = await fetch("/api/rtc/room", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.jwtToken ? { Authorization: `Bearer ${this.jwtToken}` } : {}),
+          },
+          body: JSON.stringify({ target: this.profile.userId }),
+          credentials: "include",
+        });
+
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          console.error("Create room failed", res.status, txt);
+          alert("Unable to create call room. Try again.");
+          this.starting = false;
+          return;
+        }
+
+        const data = await res.json();
+        this.activeRoomId = data?.roomId || data?.room?.roomId || `call-${Date.now()}`;
+        this.inCall = true;
+
+        this.$emit("started-call", { roomId: this.activeRoomId, target: this.profile.userId });
+      } catch (err) {
+        console.error("onStartCall error", err);
+        alert("Could not start call — check network / permissions.");
+      } finally {
+        this.starting = false;
+      }
     },
+
     leaveCall() {
       this.inCall = false;
       this.activeRoomId = "";
@@ -137,6 +177,10 @@ button.primary {
 }
 button.primary:hover {
   background-color: #2563eb;
+}
+button.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 button.secondary {
   background-color: #e2e8f0;
