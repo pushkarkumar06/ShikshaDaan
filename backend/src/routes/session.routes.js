@@ -27,17 +27,62 @@ function getUserFromReq(req) {
   return { id, role, name };
 }
 
-// safer notify wrapper: only create if userId looks valid, and never throw
+// Normalize strings by removing spaces and normalizing dash chars
+function normSlot(s = "") {
+  return String(s).replace(/\s+/g, "").replace(/–|—/g, "-").trim();
+}
+
+// robust: remove a slot from a volunteer's availability (tries userId and _id lookups)
+// handles slots stored as "11:30" or "11:30-12:00" (with/without spaces)
+async function removeVolunteerSlot(volunteerId, dateStr, timeStr) {
+  try {
+    if (!volunteerId || !dateStr || !timeStr) return;
+
+    const uid = String(volunteerId);
+    let vol = null;
+
+    // try common lookup strategies
+    try { vol = await Volunteer.findOne({ userId: uid }).exec(); } catch {}
+    if (!vol && isOID(uid)) {
+      try { vol = await Volunteer.findById(uid).exec(); } catch {}
+    }
+
+    if (!vol) return;
+    if (!Array.isArray(vol.availability)) return;
+
+    const wanted = normSlot(timeStr);
+    const day = vol.availability.find((d) => {
+      const aDate = typeof d.date === "string" ? d.date : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
+      return aDate === dateStr;
+    });
+    if (!day || !Array.isArray(day.slots)) return;
+
+    const before = day.slots.length;
+    day.slots = day.slots.filter((s) => {
+      if (!s) return false;
+      const slot = normSlot(s);
+      if (slot === wanted) return false; // exact match
+      if (slot.startsWith(wanted) || wanted.startsWith(slot)) return false; // range containment
+      // also handle "09:00-10:00" vs "09:00" etc.
+      return true;
+    });
+
+    if (day.slots.length !== before) {
+      await vol.save();
+      console.log(`Removed slot ${timeStr} on ${dateStr} for volunteer ${volunteerId}`);
+    }
+  } catch (err) {
+    console.warn("removeVolunteerSlot failed:", err?.message || err);
+  }
+}
+
+// safe notification creator (won't throw)
 async function safeNotify(userId, type, payload = {}) {
   try {
     if (!userId) return;
-    // if userId is already an ObjectId, convert to string first
     const uid = String(userId);
-    if (!isOID(uid)) {
-      // skip invalid ids
-      console.warn(`safeNotify: skipping invalid user id=${uid}`);
-      return;
-    }
+    // if your Notification.user field accepts non-ObjectId strings then remove this guard
+    if (!isOID(uid)) return;
     await Notification.create({ user: uid, type, payload });
   } catch (e) {
     console.warn("safeNotify() failed:", e?.message || e);
@@ -50,14 +95,11 @@ router.post("/request", requireAuth, async (req, res) => {
     const { target, subject, message = "", date, time } = req.body;
     const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
-    if (!["student", "volunteer"].includes(userRole)) {
-      return res.status(403).json({ message: "Only students or volunteers can send requests" });
-    }
-    if (!target || !subject) {
-      return res.status(400).json({ message: "target and subject are required" });
-    }
+    if (!["student", "volunteer"].includes(userRole)) return res.status(403).json({ message: "Only students or volunteers can send requests" });
+    if (!target || !subject) return res.status(400).json({ message: "target and subject are required" });
     if (!isOID(target)) return res.status(400).json({ message: "Invalid target id" });
 
+    // determine participant ids
     let studentId, volunteerId, notifyUserId;
     if (userRole === "student") {
       studentId = toOID(userId);
@@ -67,6 +109,30 @@ router.post("/request", requireAuth, async (req, res) => {
       volunteerId = toOID(userId);
       studentId = toOID(target);
       notifyUserId = String(studentId);
+    }
+
+    // if a proposed slot provided, validate availability & whether already scheduled
+    if (date && time) {
+      // check if the volunteer already has a scheduled session at that date+time
+      const exists = await SessionRequest.exists({
+        "final.date": date,
+        "final.time": time,
+        volunteer: String(volunteerId),
+        status: { $in: ["scheduled", "in-progress"] }
+      });
+      if (exists) return res.status(400).json({ message: "Selected slot is already booked" });
+
+      // check volunteer availability (if volunteer doc exists)
+      const vol = await Volunteer.findOne({ userId: String(volunteerId) }).exec() || (isOID(String(volunteerId)) ? await Volunteer.findById(String(volunteerId)).exec() : null);
+      if (vol && Array.isArray(vol.availability)) {
+        const day = vol.availability.find(d => {
+          const aDate = typeof d.date === "string" ? d.date : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
+          return aDate === date;
+        });
+        if (!day || !Array.isArray(day.slots) || !day.slots.some(s => normSlot(s) === normSlot(time) || normSlot(s).startsWith(normSlot(time)) || normSlot(time).startsWith(normSlot(s)))) {
+          return res.status(400).json({ message: "Volunteer is not available at the requested slot" });
+        }
+      }
     }
 
     const doc = await SessionRequest.create({
@@ -79,7 +145,6 @@ router.post("/request", requireAuth, async (req, res) => {
       status: "pending",
     });
 
-    // notify the opposite user (use safeNotify)
     await safeNotify(notifyUserId, "session_request", {
       requestId: doc._id,
       actorId: userId,
@@ -112,6 +177,29 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
 
     if (!studentId || !subject) return res.status(400).json({ message: "studentId and subject are required" });
     if (!isOID(studentId)) return res.status(400).json({ message: "Invalid studentId" });
+
+    // if proposed slot provided, ensure volunteer (self) actually has that slot and it's not already booked
+    if (date && time) {
+      const vol = await Volunteer.findOne({ userId: String(userId) }).exec() || (isOID(String(userId)) ? await Volunteer.findById(String(userId)).exec() : null);
+      if (vol && Array.isArray(vol.availability)) {
+        const day = vol.availability.find(d => {
+          const aDate = typeof d.date === "string" ? d.date : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
+          return aDate === date;
+        });
+        if (!day || !Array.isArray(day.slots) || !day.slots.some(s => normSlot(s) === normSlot(time) || normSlot(s).startsWith(normSlot(time)) || normSlot(time).startsWith(normSlot(s)))) {
+          return res.status(400).json({ message: "You don't have that slot in your availability" });
+        }
+      }
+
+      // also ensure not already booked on DB
+      const exists = await SessionRequest.exists({
+        "final.date": date,
+        "final.time": time,
+        volunteer: String(userId),
+        status: { $in: ["scheduled", "in-progress"] }
+      });
+      if (exists) return res.status(400).json({ message: "Slot already booked" });
+    }
 
     const sessionRequest = new SessionRequest({
       requestedBy: toOID(userId),
@@ -149,7 +237,7 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
   }
 });
 
-// ---------- volunteer or participant accepts (schedules) ----------
+// ---------- accept (schedules) ----------
 router.post("/:id/accept", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -161,7 +249,7 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
     const sr = await SessionRequest.findById(id);
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
-    // defensive: if session request is missing participant links, mark rejected and return
+    // defensive missing participants
     if (!sr.student || !sr.volunteer) {
       sr.status = "rejected";
       sr.rejectedAt = new Date();
@@ -174,7 +262,6 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
         .populate("requestedBy", "_id name role")
         .lean();
 
-      // notify existing other party (if any) using safeNotify
       const otherId = populated.student?._id ? String(populated.student._id) : (populated.volunteer?._id ? String(populated.volunteer._id) : null);
       if (otherId) {
         await safeNotify(otherId, "session_update", {
@@ -188,35 +275,29 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
         });
       }
 
-      // emit socket event safely
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        try {
-          const studentId = populated.student?._id ? String(populated.student._id) : (populated.student ? String(populated.student) : null);
-          const volunteerId = populated.volunteer?._id ? String(populated.volunteer._id) : (populated.volunteer ? String(populated.volunteer) : null);
-          if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:rejected", payload);
-          if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
-        } catch (e) {
-          console.warn("socket emit failed:", e?.message || e);
-        }
+        const studentId = String(populated.student?._id || populated.student || '');
+        const volunteerId = String(populated.volunteer?._id || populated.volunteer || '');
+        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
       return res.json(populated);
     }
 
-    // Allow both volunteer and student (or admin) to accept
-    const isParticipant =
-      String(sr.volunteer) === String(userId) ||
-      String(sr.student) === String(userId);
+    const isParticipant = String(sr.volunteer) === String(userId) || String(sr.student) === String(userId);
+    if (!isParticipant && userRole !== "admin") return res.status(403).json({ message: "Only participants can accept" });
 
-    if (!isParticipant && userRole !== "admin") {
-      return res.status(403).json({ message: "Only participants (student or volunteer) can accept here" });
-    }
-
-    // If scheduledAt given, set Date
+    // set scheduledAt and final consistently so removal works
     if (scheduledAt) {
-      sr.scheduledAt = new Date(scheduledAt);
+      const dt = new Date(scheduledAt);
+      sr.scheduledAt = dt;
+      sr.final = {
+        date: dt.toISOString().split("T")[0],
+        time: dt.toTimeString().slice(0,5),
+      };
     } else if (date && time) {
       const [h = 0, m = 0] = (time || "00:00").split(":").map(Number);
       const d = new Date(date);
@@ -230,9 +311,17 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
     sr.updatedAt = new Date();
     sr.sessionRoomId = sr.sessionRoomId || `session-${sr._id}`;
 
+    // remove slot if scheduled
+    if (sr.status === "scheduled") {
+      try {
+        const dateStr = sr.final?.date || (sr.scheduledAt ? sr.scheduledAt.toISOString().split("T")[0] : null);
+        const timeStr = sr.final?.time || (sr.scheduledAt ? sr.scheduledAt.toTimeString().slice(0,5) : null);
+        if (dateStr && timeStr) await removeVolunteerSlot(String(sr.volunteer), dateStr, timeStr);
+      } catch (e) { console.warn("slot removal (accept) failed:", e?.message || e); }
+    }
+
     await sr.save();
 
-    // award badges if scheduled
     if (sr.status === "scheduled") {
       try { await awardBadgesForVolunteer(String(sr.volunteer)); } catch (e) { console.warn("awardBadges failed", e); }
     }
@@ -243,12 +332,11 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
       .populate("requestedBy", "_id name role")
       .lean();
 
-    // create notifications for other party (safe)
     const otherId = String(populated.student?._id || populated.student) === String(userId)
       ? String(populated.volunteer?._id || populated.volunteer)
       : String(populated.student?._id || populated.student);
 
-    if (otherId && isOID(otherId)) {
+    if (otherId) {
       await safeNotify(otherId, "session_update", {
         requestId: populated._id,
         status: populated.status,
@@ -263,7 +351,6 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
       });
     }
 
-    // emit socket events safely
     const io = req.app.locals.io || req.app.get("io");
     const payload = {
       _id: String(populated._id),
@@ -275,14 +362,11 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
       try {
         const studentId = populated.student?._id ? String(populated.student._id) : (populated.student ? String(populated.student) : null);
         const volunteerId = populated.volunteer?._id ? String(populated.volunteer._id) : (populated.volunteer ? String(populated.volunteer) : null);
-        if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit(populated.status === "scheduled" ? "session:scheduled" : "session:accepted", payload);
-        if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit(populated.status === "scheduled" ? "session:scheduled" : "session:accepted", payload);
-      } catch (e) {
-        console.warn("socket emit failed:", e?.message || e);
-      }
+        if (studentId) io.to(`user:${studentId}`).emit(populated.status === "scheduled" ? "session:scheduled" : "session:accepted", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit(populated.status === "scheduled" ? "session:scheduled" : "session:accepted", payload);
+      } catch (e) { console.warn("socket emit failed:", e?.message || e); }
     }
 
-    // schedule start if scheduler exists
     if (req.app.get("scheduler")) {
       try { req.app.get("scheduler").scheduleSessionStart(sr); } catch (e) { console.warn("scheduleSessionStart failed", e); }
     }
@@ -294,7 +378,7 @@ router.post("/:id/accept", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- reject endpoint (defensive) ----------
+// ---------- reject ----------
 router.post("/:id/reject", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -302,15 +386,12 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
     const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
     if (!isOID(id)) return res.status(400).json({ message: "Invalid session id" });
-
     const sr = await SessionRequest.findById(id);
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
-    // normalize participant ids to strings (safe if missing)
     const studentIdStr = sr.student ? String(sr.student) : null;
     const volunteerIdStr = sr.volunteer ? String(sr.volunteer) : null;
 
-    // allow participant (student or volunteer) to reject, or admin
     if (userRole !== "admin" && String(userId) !== studentIdStr && String(userId) !== volunteerIdStr) {
       return res.status(403).json({ message: "Not allowed to reject this request" });
     }
@@ -326,12 +407,11 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
       .populate("requestedBy", "_id name role")
       .lean();
 
-    // determine the other party safely and notify if valid
     const otherId = (String(userId) === String(populated.student?._id || populated.student || ''))
       ? String(populated.volunteer?._id || populated.volunteer || '')
       : String(populated.student?._id || populated.student || '');
 
-    if (otherId && isOID(otherId)) {
+    if (otherId) {
       try {
         await safeNotify(otherId, "session_update", {
           requestId: populated._id,
@@ -342,23 +422,18 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
           subject: populated.subject,
           message: reason || populated.message || "",
         });
-      } catch (e) {
-        console.warn("notify other party failed:", e?.message || e);
-      }
+      } catch (e) { console.warn("notify other party failed:", e?.message || e); }
     }
 
-    // emit socket event safely
     const io = req.app.locals.io || req.app.get("io");
     const payload = { _id: String(populated._id), status: "rejected", session: populated };
     if (io) {
       try {
         const studentId = populated.student?._id ? String(populated.student._id) : (populated.student ? String(populated.student) : null);
         const volunteerId = populated.volunteer?._id ? String(populated.volunteer._id) : (populated.volunteer ? String(populated.volunteer) : null);
-        if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:rejected", payload);
-        if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
-      } catch (e) {
-        console.warn("socket emit failed:", e?.message || e);
-      }
+        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
+      } catch (e) { console.warn("socket emit failed:", e?.message || e); }
     }
 
     return res.json(populated);
@@ -368,7 +443,7 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- generic status updater (kept for compatibility) ----------
+// ---------- generic status updater ----------
 router.put("/:id/status", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -376,14 +451,12 @@ router.put("/:id/status", requireAuth, async (req, res) => {
     const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
     if (!isOID(id)) return res.status(400).json({ message: "Invalid session id" });
-
     const allowed = ["accepted", "rejected", "scheduled", "completed", "cancelled"];
     if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid status" });
 
     const sr = await SessionRequest.findById(id);
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
-    // defensive: if session request is missing participant links, mark rejected and return
     if (!sr.student || !sr.volunteer) {
       sr.status = "rejected";
       sr.rejectedAt = new Date();
@@ -397,7 +470,7 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         .lean();
 
       const otherId = populated.student?._id ? String(populated.student._id) : (populated.volunteer?._id ? String(populated.volunteer._id) : null);
-      if (otherId && isOID(otherId)) {
+      if (otherId) {
         await safeNotify(otherId, "session_update", {
           requestId: populated._id,
           status: "rejected",
@@ -412,14 +485,10 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        try {
-          const studentId = String(populated.student?._id || populated.student || '');
-          const volunteerId = String(populated.volunteer?._id || populated.volunteer || '');
-          if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:rejected", payload);
-          if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
-        } catch (e) {
-          console.warn("socket emit failed:", e?.message || e);
-        }
+        const studentId = String(populated.student?._id || populated.student || '');
+        const volunteerId = String(populated.volunteer?._id || populated.volunteer || '');
+        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
       return res.json(populated);
@@ -436,6 +505,8 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       d.setHours(h, m, 0, 0);
       sr.scheduledAt = d;
       sr.final = { date, time };
+
+      try { await removeVolunteerSlot(String(sr.volunteer), date, time); } catch (e) { console.warn("slot removal (status update) failed:", e?.message || e); }
     }
     if (status === "completed") sr.completedAt = new Date();
     if (status === "rejected") sr.rejectedAt = new Date();
@@ -459,11 +530,9 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       try {
         const studentId = populated.student?._id ? String(populated.student._id) : (populated.student ? String(populated.student) : null);
         const volunteerId = populated.volunteer?._id ? String(populated.volunteer._id) : (populated.volunteer ? String(populated.volunteer) : null);
-        if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit(`session:${status}`, payload);
-        if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit(`session:${status}`, payload);
-      } catch (e) {
-        console.warn("socket emit failed:", e?.message || e);
-      }
+        if (studentId) io.to(`user:${studentId}`).emit(`session:${status}`, payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit(`session:${status}`, payload);
+      } catch (e) { console.warn("socket emit failed:", e?.message || e); }
     }
 
     return res.json(populated);
@@ -473,11 +542,11 @@ router.put("/:id/status", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- student or volunteer respond (accept/reject) ----------
+// ---------- respond (student/volunteer accept or reject) ----------
 router.post("/:id/respond", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { action } = req.body; // 'accepted' | 'rejected'
+    const { action } = req.body;
     const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
     if (!isOID(id)) return res.status(400).json({ message: "Invalid session id" });
@@ -486,7 +555,6 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
     const sr = await SessionRequest.findById(id).populate("student", "_id name role").populate("volunteer", "_id name role");
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
-    // defensive: if session request is missing participant links, mark rejected and return
     if (!sr.student || !sr.volunteer) {
       sr.status = "rejected";
       sr.rejectedAt = new Date();
@@ -500,7 +568,7 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
         .lean();
 
       const otherId = populated.student?._id ? String(populated.student._id) : (populated.volunteer?._id ? String(populated.volunteer._id) : null);
-      if (otherId && isOID(otherId)) {
+      if (otherId) {
         await safeNotify(otherId, "session_update", {
           requestId: populated._id,
           status: "rejected",
@@ -515,14 +583,10 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        try {
-          const studentId = populated.student?._id ? String(populated.student._id) : (populated.student ? String(populated.student) : null);
-          const volunteerId = populated.volunteer?._id ? String(populated.volunteer._id) : (populated.volunteer ? String(populated.volunteer) : null);
-          if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:rejected", payload);
-          if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
-        } catch (e) {
-          console.warn("socket emit failed:", e?.message || e);
-        }
+        const studentId = String(populated.student?._id || populated.student || '');
+        const volunteerId = String(populated.volunteer?._id || populated.volunteer || '');
+        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
       return res.json(populated);
@@ -531,7 +595,6 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
     const studentId = String(sr.student?._id || sr.student);
     const volunteerId = String(sr.volunteer?._id || sr.volunteer);
 
-    // allow either participant (student OR volunteer) or admin to respond
     if (String(userId) !== studentId && String(userId) !== volunteerId && userRole !== "admin") {
       return res.status(403).json({ message: "Not authorized to respond to this request" });
     }
@@ -547,9 +610,8 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
         .populate("requestedBy", "_id name role")
         .lean();
 
-      // notify the other party (the one who did not perform the action)
       const otherId = String(userId) === studentId ? volunteerId : studentId;
-      if (otherId && isOID(otherId)) {
+      if (otherId) {
         await safeNotify(otherId, "session_update", {
           requestId: populated._id,
           status: "rejected",
@@ -564,21 +626,25 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        try {
-          if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:rejected", payload);
-          if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
-        } catch (e) {
-          console.warn("socket emit failed:", e?.message || e);
-        }
+        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
       return res.json(populated);
     }
 
-    // action === 'accepted'
-    // If there is a proposed slot, check availability and attempt to schedule; otherwise mark accepted.
+    // accepted path
     if (sr.proposed?.date && sr.proposed?.time) {
-      const vol = await Volunteer.findOne({ userId: volunteerId });
+      // robust vol lookup
+      let vol = null;
+      try { vol = await Volunteer.findOne({ userId: volunteerId }).exec(); } catch {}
+      if (!vol && isOID(volunteerId)) {
+        try { vol = await Volunteer.findOne({ userId: toOID(volunteerId) }).exec(); } catch {}
+        if (!vol) {
+          try { vol = await Volunteer.findById(volunteerId).exec(); } catch {}
+        }
+      }
+
       let slotTaken = false;
       if (vol) {
         slotTaken = await SessionRequest.exists({
@@ -600,7 +666,6 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
           .populate("requestedBy", "_id name role")
           .lean();
 
-        // ask volunteer to reschedule (safe)
         await safeNotify(volunteerId, "session_reschedule_request", {
           sessionId: sr._id,
           session: populated,
@@ -613,11 +678,10 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
 
         return res.json({ message: "Accepted but needs rescheduling", needsReschedule: true, sessionRequest: populated });
       } else {
-        // schedule
+        // schedule and remove slot
         sr.status = "scheduled";
         sr.final = { date: sr.proposed.date, time: sr.proposed.time, zoomLink: sr.proposed.zoomLink || null };
 
-        // set scheduledAt
         const [h = 0, m = 0] = (sr.proposed.time || "00:00").split(":").map(Number);
         const startAt = new Date(sr.proposed.date);
         startAt.setHours(h, m, 0, 0);
@@ -626,9 +690,18 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
 
         // reserve slot in volunteer availability if possible
         if (vol) {
-          const day = (vol.availability || []).find((a) => a.date === sr.proposed.date);
+          const day = (vol.availability || []).find((a) => {
+            const aDate = typeof a.date === "string" ? a.date : (a.date ? new Date(a.date).toISOString().split("T")[0] : null);
+            return aDate === sr.proposed.date;
+          });
           if (day && Array.isArray(day.slots)) {
-            day.slots = day.slots.filter((s) => s !== sr.proposed.time);
+            const wanted = normSlot(sr.proposed.time);
+            day.slots = day.slots.filter((s) => {
+              const slot = normSlot(s);
+              if (slot === wanted) return false;
+              if (slot.startsWith(wanted) || wanted.startsWith(slot)) return false;
+              return true;
+            });
             await vol.save();
           }
         }
@@ -641,9 +714,8 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
           .populate("requestedBy", "_id name role")
           .lean();
 
-        // notify the other party (safe)
         const notifyTo = String(userId) === studentId ? volunteerId : studentId;
-        if (notifyTo && isOID(notifyTo)) {
+        if (notifyTo) {
           await safeNotify(notifyTo, "session_update", {
             requestId: populated._id,
             status: populated.status,
@@ -657,7 +729,6 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
           });
         }
 
-        // emit scheduled event (safe)
         const io = req.app.locals.io || req.app.get("io");
         const payload = {
           _id: String(populated._id),
@@ -666,20 +737,14 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
           session: populated
         };
         if (io) {
-          try {
-            if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:scheduled", payload);
-            if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:scheduled", payload);
-          } catch (e) {
-            console.warn("socket emit failed:", e?.message || e);
-          }
+          if (studentId) io.to(`user:${studentId}`).emit("session:scheduled", payload);
+          if (volunteerId) io.to(`user:${volunteerId}`).emit("session:scheduled", payload);
         }
 
-        // schedule start if scheduler exists
         if (req.app.get("scheduler")) {
           try { req.app.get("scheduler").scheduleSessionStart(sr); } catch (e) { console.warn("scheduleSessionStart failed", e); }
         }
 
-        // award badges
         try { await awardBadgesForVolunteer(String(sr.volunteer)); } catch (e) { console.warn("awardBadgesForVolunteer failed", e); }
 
         return res.json(populated);
@@ -696,9 +761,8 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
         .populate("requestedBy", "_id name role")
         .lean();
 
-      // notify the other party (safe)
       const notifyTo = String(userId) === studentId ? volunteerId : studentId;
-      if (notifyTo && isOID(notifyTo)) {
+      if (notifyTo) {
         await safeNotify(notifyTo, "session_accepted", {
           requestId: populated._id,
           status: "accepted",
@@ -712,12 +776,8 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "accepted", session: populated };
       if (io) {
-        try {
-          if (studentId && isOID(studentId)) io.to(`user:${studentId}`).emit("session:accepted", payload);
-          if (volunteerId && isOID(volunteerId)) io.to(`user:${volunteerId}`).emit("session:accepted", payload);
-        } catch (e) {
-          console.warn("socket emit failed:", e?.message || e);
-        }
+        if (studentId) io.to(`user:${studentId}`).emit("session:accepted", payload);
+        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:accepted", payload);
       }
 
       return res.json(populated);
