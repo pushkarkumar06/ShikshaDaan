@@ -539,7 +539,24 @@
     <div>Message: {{ r.message || '-' }}</div>
     <div>Status: {{ r.status }}</div>
     <div v-if="r.proposed">Proposed: {{ r.proposed.date }} {{ r.proposed.time }}</div>
-    <div v-if="r.final">Final: {{ r.final.date }} {{ r.final.time }} — <a :href="r.final.zoomLink" target="_blank">Join</a></div>
+    <div v-if="r.final">
+      Final: {{ r.final.date }} {{ r.final.time }}
+      <span v-if="r.final.zoomLink">
+        — <a :href="r.final.zoomLink" target="_blank" rel="noopener">Join</a>
+      </span>
+      <span v-else>
+        <!-- show Generate & Join when no zoomLink yet -->
+        <!-- Optionally restrict button visibility (participants only) -->
+        <button
+          v-if="user && (String(user._id)===String(r.student?._id||r.student) || String(user._id)===String(r.volunteer?._id||r.volunteer))"
+          @click="joinSession(r._id)"
+          style="margin-left:8px"
+        >
+          Generate & Join
+        </button>
+        <span v-else class="small" style="margin-left:8px; opacity:.8">No join link yet</span>
+      </span>
+    </div>
     <div class="row" style="margin-top:10px; gap:6px">
       <!-- Show Accept/Reject buttons only when request is pending, user is a participant, and both student and volunteer exist -->
       <button 
@@ -1830,7 +1847,34 @@ async function bookSlotAsStudent() {
 }
 
 
-// ...existing code...
+// Join (generate join link on demand) - opens the session in a new tab
+async function joinSession(sessionId) {
+  if (!user.value) return alert('Login first');
+  if (!sessionId) return alert('Missing session id');
+
+  try {
+    // Backend should create/provide a link only at allowed time and return { joinUrl }
+    const data = await api(`/sessions/${sessionId}/join`, { 
+      method: 'POST', 
+      body: JSON.stringify({}) 
+    });
+    
+    const url = data?.joinUrl || data?.zoomLink || data?.join_link || null;
+    if (!url) {
+      alert('Join link not available yet.');
+      // optionally refresh session state
+      await loadMyRequests();
+      return;
+    }
+    // open in new tab
+    window.open(url, '_blank');
+  } catch (err) {
+    console.error('joinSession failed', err);
+    alert(err?.message || 'Failed to generate/join meeting');
+    // refresh session state in case link was created server-side
+    try { await loadMyRequests(); } catch (e) {}
+  }
+}
 
 // people
 function buildFollowingSet() { followingSet.value = new Set((following.value || []).map(p => String(p._id))) }
@@ -2002,14 +2046,28 @@ function connectSocket() {
   socket.value.on('session:starting', (session) => {
     try {
       if (!user.value) return;
-      const isParticipant = String(user.value._id) === String(session?.studentId) || String(user.value._id) === String(session?.volunteerId);
+      const isParticipant = String(user.value._id) === String(session?.student || session?.studentId) ||
+                          String(user.value._id) === String(session?.volunteer || session?.volunteerId);
       if (!isParticipant) return;
-      const joinLink = session.zoomLink || session.joinLink || '#';
-      const subject = session.subject || '';
-      const startTime = session.startAt ? new Date(session.startAt).toLocaleTimeString() : 'soon';
-      if (confirm(`Your ${subject ? subject + ' ' : ''}session is about to start ${startTime}.\n\nClick OK to join now.`)) {
-        if (joinLink && joinLink !== '#') window.open(joinLink, '_blank');
-        else alert('No join link available.');
+
+      // prefer common locations for join URL
+      const joinLink =
+        session?.final?.zoomLink ||
+        session?.zoomLink ||
+        session?.joinUrl ||
+        session?.joinLink ||
+        session?.raw?.final?.zoomLink ||
+        null;
+
+      const subject = session?.subject || '';
+      const startTime = session?.startAt ? new Date(session.startAt).toLocaleTimeString() : (session?.startAt ? new Date(session.startAt).toLocaleString() : 'now');
+
+      if (confirm(`Your ${subject ? subject + ' ' : ''}session is starting at ${startTime}.\n\nClick OK to join now.` )) {
+        if (joinLink) window.open(joinLink, '_blank');
+        else {
+          // try to ask server to generate link on-demand
+          joinSession(String(session.sessionId || session._id || session.requestId || session.sessionId));
+        }
       }
     } catch (e) { console.error('Error in session:starting handler:', e); }
   });

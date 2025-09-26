@@ -76,29 +76,29 @@ const io = new SocketIOServer(server, {
     methods: ["GET", "POST"],
     credentials: true,
   },
-  // allow both transports so client can fall back to polling
   transports: ["websocket", "polling"],
-  // optional tuning
   pingInterval: 25000,
   pingTimeout: 60000,
 });
 export const getIO = () => io;
 
-// make io accessible in express handlers (both ways)
+// attach io to app for route handlers to use
 app.set("io", io);
 app.locals.io = io;
 
-// scheduler (if your service exposes createScheduler)
+// ---------- scheduler ----------
 let scheduler = null;
 try {
   scheduler = createScheduler && typeof createScheduler === "function" ? createScheduler(io) : null;
   app.set("scheduler", scheduler);
+  app.locals.scheduler = scheduler;
+  console.log("[BE] Scheduler initialized");
 } catch (e) {
-  console.warn("Scheduler init failed:", e?.message || e);
+  console.warn("[BE] Scheduler init failed:", e?.message || e);
 }
 
-// simple userId -> socketId mapping for direct signaling
-const userSocketMap = new Map();
+// ---------- socket helpers ----------
+const userSocketMap = new Map(); // userId -> socketId
 
 // ----- socket auth middleware -----
 // Accept token in: socket.handshake.auth.token OR socket.handshake.query.token OR Authorization header
@@ -111,18 +111,19 @@ io.use(async (socket, next) => {
       "";
 
     if (!authToken) {
-      // allow unauthenticated sockets if you want (remove return next(new Error(...)) to allow)
       return next(new Error("No token"));
     }
 
     const decoded = jwt.verify(authToken, process.env.JWT_SECRET);
+    if (!decoded || !decoded.id) return next(new Error("Invalid token"));
+
     const user = await User.findById(decoded.id).select("_id name role");
     if (!user) return next(new Error("User not found"));
 
     socket.user = { _id: user._id, name: user.name, role: user.role };
     return next();
   } catch (err) {
-    console.warn("Socket auth failed:", err?.message || err);
+    console.warn("[IO] Socket auth failed:", err?.message || err);
     return next(new Error("Unauthorized"));
   }
 });
@@ -178,7 +179,7 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("call:leave", { userId });
   });
 
-  // ---- rtc: shim events (socket-id based) ----
+  // ---- rtc shim events (socket-id based) ----
   socket.on("rtc:join", ({ roomId, user } = {}) => {
     if (!roomId) return;
     socket.join(roomId);
@@ -289,7 +290,6 @@ io.on("connection", (socket) => {
 
     for (const roomId of socket.rooms) {
       if (roomId === socket.id) continue;
-      // avoid user: and conv: rooms
       if (typeof roomId === "string" && (roomId.startsWith("user:") || roomId.startsWith("conv:"))) continue;
       socket.to(roomId).emit("call:leave", { socketId: socket.id });
       socket.to(roomId).emit("rtc:peer-left", { socketId: socket.id });
@@ -309,7 +309,25 @@ connectDB()
   });
 
 // graceful shutdown
-process.on("SIGINT", () => {
-  console.log("Shutting down...");
-  server.close(() => process.exit(0));
-});
+async function shutdown(signal) {
+  try {
+    console.log(`[BE] Shutting down due to ${signal}...`);
+    if (scheduler && typeof scheduler.clearAll === "function") {
+      try { scheduler.clearAll(); } catch (e) { console.warn("Failed to clear scheduler timers:", e?.message || e); }
+    }
+    server.close(() => {
+      console.log("[BE] HTTP server closed");
+      process.exit(0);
+    });
+    // force exit after 10s
+    setTimeout(() => {
+      console.warn("[BE] Force exiting");
+      process.exit(1);
+    }, 10000).unref();
+  } catch (e) {
+    console.error("[BE] shutdown error", e);
+    process.exit(1);
+  }
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

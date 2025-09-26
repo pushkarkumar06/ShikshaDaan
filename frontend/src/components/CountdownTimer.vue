@@ -1,9 +1,14 @@
 <template>
   <div class="countdown" role="timer" aria-live="polite">
-    <span v-if="timeLeft.total <= 0 && !showOverdue">LIVE</span>
-    <span v-else-if="timeLeft.total <= 0 && showOverdue">
-      LIVE (overdue {{ overdueText }})
+    <!-- When time is up -->
+    <span v-if="timeLeft.total <= 0 && !showOverdue" class="live">LIVE</span>
+
+    <!-- When time is overdue -->
+    <span v-else-if="timeLeft.total <= 0 && showOverdue" class="live overdue">
+      LIVE ({{ overdueText }} ago)
     </span>
+
+    <!-- Normal countdown -->
     <span v-else>
       <template v-if="timeLeft.days > 0">{{ timeLeft.days }}d </template>
       <template v-if="timeLeft.hours > 0">{{ pad(timeLeft.hours) }}h </template>
@@ -17,10 +22,11 @@
 import { ref, onMounted, onBeforeUnmount, watch, computed } from "vue";
 
 const props = defineProps({
-  // ISO string or timestamp in ms
-  startAt: { type: [String, Number], required: true },
-  // optional: show negative / overdue? default false
+  // Scheduled start time: ISO string or ms timestamp
+  startAt: { type: [String, Number, Date], required: true },
+  // If true, continue ticking even after overdue
   showOverdue: { type: Boolean, default: false },
+  // Tick interval (ms)
   tickMs: { type: Number, default: 1000 },
 });
 
@@ -31,7 +37,7 @@ let intervalId = null;
 let reachedZero = false;
 
 function compute(ms) {
-  const total = ms; // can be negative if showOverdue true
+  const total = ms;
   const absTotal = Math.abs(Math.floor(total));
   const secondsTotal = Math.floor(absTotal / 1000);
   const days = Math.floor(secondsTotal / 86400);
@@ -46,43 +52,40 @@ function pad(n) {
 }
 
 function parseStartAt() {
+  if (props.startAt instanceof Date) return props.startAt.getTime();
   if (typeof props.startAt === "number") return props.startAt;
   const p = Date.parse(props.startAt);
   return Number.isNaN(p) ? null : p;
 }
 
 function update() {
-  const s = parseStartAt();
-  if (s === null) {
+  const startMs = parseStartAt();
+  if (startMs === null) {
     timeLeft.value = compute(0);
     return;
   }
+
   const now = Date.now();
-  const diff = s - now;
-  // if not showOverdue, clamp at 0
+  const diff = startMs - now;
   const total = props.showOverdue ? diff : Math.max(0, diff);
+
   timeLeft.value = compute(total);
 
-  // emit every tick
   emit("tick", { ...timeLeft.value });
 
-  // when we cross to <=0, emit started once
   if (!reachedZero && diff <= 0) {
     reachedZero = true;
-    emit("started", { startAt: new Date(s).toISOString() });
-    if (!props.showOverdue) {
-      // stop ticking to save CPU if not showing overdue
-      if (intervalId) {
-        clearInterval(intervalId);
-        intervalId = null;
-      }
+    emit("started", { startAt: new Date(startMs).toISOString() });
+    if (!props.showOverdue && intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
     }
   }
 }
 
 onMounted(() => {
   update();
-  if (!intervalId) intervalId = setInterval(update, props.tickMs);
+  intervalId = setInterval(update, props.tickMs);
 });
 
 onBeforeUnmount(() => {
@@ -90,7 +93,6 @@ onBeforeUnmount(() => {
 });
 
 watch(() => props.startAt, () => {
-  // reset reachedZero so if startAt changes to future we resume ticks
   reachedZero = false;
   update();
   if (!intervalId) intervalId = setInterval(update, props.tickMs);
@@ -98,7 +100,6 @@ watch(() => props.startAt, () => {
 
 const overdueText = computed(() => {
   if (timeLeft.value.total >= 0) return "";
-  // compute human readable overdue (days/h:m:s)
   const tf = timeLeft.value;
   return `${tf.days}d ${pad(tf.hours)}:${pad(tf.minutes)}:${pad(tf.seconds)}`;
 });
@@ -107,6 +108,15 @@ const overdueText = computed(() => {
 <style scoped>
 .countdown {
   font-weight: 600;
+  font-size: 1rem;
   color: #1f2937;
+}
+
+.live {
+  color: #10b981;
+}
+
+.overdue {
+  color: #ef4444;
 }
 </style>
