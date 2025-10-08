@@ -29,6 +29,8 @@ import ChatConversation from "./models/ChatConversation.js";
 import ChatMessage from "./models/ChatMessage.js";
 import Notification from "./models/Notification.js";
 import User from "./models/user.js";
+
+// ✅ ensure the scheduler file is src/services/scheduler.js
 import createScheduler from "./services/scheduler.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,13 +38,15 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// ---------- middleware ----------
+/* ------------------------------ middleware ------------------------------ */
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:5173",
     credentials: true,
   })
 );
+
+// keep JSON large enough for webhook payloads if needed
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -57,7 +61,7 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 app.use("/uploads", express.static(uploadsDir));
 console.log("[BE] Serving /uploads from:", uploadsDir);
 
-// ---------- api routes ----------
+/* --------------------------------- routes -------------------------------- */
 app.use("/api/auth", authRoutes);
 app.use("/api/volunteers", volunteerRoutes);
 app.use("/api/students", studentRoutes);
@@ -66,9 +70,11 @@ app.use("/api/users", userRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/chat", chatRoutes);
+
+// ✅ Zoom + RTC routes (now include /zoom/meeting, /zoom/webhook, etc.)
 app.use("/api/rtc", rtcRoutes);
 
-// ---------- http + socket.io ----------
+/* ------------------------------ http + socket ----------------------------- */
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
   cors: {
@@ -82,11 +88,11 @@ const io = new SocketIOServer(server, {
 });
 export const getIO = () => io;
 
-// attach io to app for route handlers to use
+// attach io to app for route handlers & scheduler
 app.set("io", io);
 app.locals.io = io;
 
-// ---------- scheduler ----------
+/* -------------------------------- scheduler ------------------------------- */
 let scheduler = null;
 try {
   scheduler = createScheduler && typeof createScheduler === "function" ? createScheduler(io) : null;
@@ -97,11 +103,9 @@ try {
   console.warn("[BE] Scheduler init failed:", e?.message || e);
 }
 
-// ---------- socket helpers ----------
-const userSocketMap = new Map(); // userId -> socketId
-
-// ----- socket auth middleware -----
+/* --------------------------- socket auth middleware ----------------------- */
 // Accept token in: socket.handshake.auth.token OR socket.handshake.query.token OR Authorization header
+const userSocketMap = new Map(); // userId -> socketId
 io.use(async (socket, next) => {
   try {
     const authToken =
@@ -110,9 +114,7 @@ io.use(async (socket, next) => {
       (socket.handshake?.headers?.authorization || "").replace("Bearer ", "") ||
       "";
 
-    if (!authToken) {
-      return next(new Error("No token"));
-    }
+    if (!authToken) return next(new Error("No token"));
 
     const decoded = jwt.verify(authToken, process.env.JWT_SECRET);
     if (!decoded || !decoded.id) return next(new Error("Invalid token"));
@@ -128,7 +130,7 @@ io.use(async (socket, next) => {
   }
 });
 
-// ---------- socket event handling ----------
+/* ----------------------------- socket handlers ---------------------------- */
 io.on("connection", (socket) => {
   const me = String(socket.user?._id || "");
   console.log(`[IO] connected socket=${socket.id} user=${me || "unknown"}`);
@@ -222,7 +224,9 @@ io.on("connection", (socket) => {
       if (!isParticipant) return;
 
       const safeText = (text || "").toString().slice(0, 4000);
-      const safeAttachments = Array.isArray(attachments) ? attachments.map(a => ({ url: a.url, name: a.name, mime: a.mime, size: a.size })) : [];
+      const safeAttachments = Array.isArray(attachments)
+        ? attachments.map((a) => ({ url: a.url, name: a.name, mime: a.mime, size: a.size }))
+        : [];
 
       if (!safeText && safeAttachments.length === 0) return;
 
@@ -252,7 +256,11 @@ io.on("connection", (socket) => {
         if (pid !== meId) {
           io.to(`user:${pid}`).emit("conversations:updated", { conversationId: String(conv._id) });
           try {
-            await Notification.create({ user: pid, type: "chat_message", payload: { conversationId: conv._id, from: meId, text: msg.text } });
+            await Notification.create({
+              user: pid,
+              type: "chat_message",
+              payload: { conversationId: conv._id, from: meId, text: msg.text },
+            });
           } catch (e) {
             console.warn("Failed to create notification for chat message:", e?.message || e);
           }
@@ -272,7 +280,10 @@ io.on("connection", (socket) => {
       const isParticipant = conv.participants.some((p) => String(p) === meId);
       if (!isParticipant) return;
 
-      await ChatMessage.updateMany({ conversation: conv._id, readBy: { $ne: socket.user._id } }, { $addToSet: { readBy: socket.user._id } });
+      await ChatMessage.updateMany(
+        { conversation: conv._id, readBy: { $ne: socket.user._id } },
+        { $addToSet: { readBy: socket.user._id } }
+      );
       conv.unread.set(meId, 0);
       await conv.save();
 
@@ -297,23 +308,30 @@ io.on("connection", (socket) => {
   });
 });
 
-// ---------- start server ----------
+/* ------------------------------- start server ------------------------------ */
 const PORT = process.env.PORT || 5000;
+
 connectDB()
   .then(() => {
-    server.listen(PORT, () => console.log(`API + Sockets on http://localhost:${PORT}`));
+    server.listen(PORT, () =>
+      console.log(`API + Sockets on http://localhost:${PORT}\nZoom host: ${process.env.ZOOM_DEFAULT_HOST_EMAIL || "not set"}`)
+    );
   })
   .catch((err) => {
     console.error("DB connect failed:", err);
     process.exit(1);
   });
 
-// graceful shutdown
+/* ----------------------------- graceful shutdown --------------------------- */
 async function shutdown(signal) {
   try {
     console.log(`[BE] Shutting down due to ${signal}...`);
     if (scheduler && typeof scheduler.clearAll === "function") {
-      try { scheduler.clearAll(); } catch (e) { console.warn("Failed to clear scheduler timers:", e?.message || e); }
+      try {
+        scheduler.clearAll();
+      } catch (e) {
+        console.warn("Failed to clear scheduler timers:", e?.message || e);
+      }
     }
     server.close(() => {
       console.log("[BE] HTTP server closed");

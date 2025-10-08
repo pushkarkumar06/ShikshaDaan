@@ -1,230 +1,221 @@
 // src/schedular.js
-import SessionRequest from "./models/SessionRequest.js";
-import { createZoomMeetingStub, createInternalMeetingLink } from "./services/zoom.js";
-import mongoose from "mongoose";
+import SessionRequest from "./models/SessionRequest.js";        // adjust path if needed
+import { endMeeting } from "./services/zoom.js";                // adjust path if needed
 
 /**
- * lightweight scheduler that:
- * - schedules a timeout to run at session start
- * - when triggered, ensures a meeting link exists (generates one just-in-time)
- * - saves the link into SessionRequest.final.zoomLink (if needed)
- * - emits socket events to users/room with meeting link and payload
+ * Lightweight scheduler:
+ *  - Schedules a "window open" ping at T-10 minutes to let UI enable "Generate & Join"
+ *  - Schedules an auto-end at session end (calls Zoom endMeeting + marks completed)
+ *  - Emits socket events to both student and volunteer rooms
  *
  * Usage:
  *   const scheduler = createScheduler(io);
- *   scheduler.scheduleSessionStart(sessionObj);
+ *   scheduler.scheduleSession(sessionDocOrLeanObj);
+ *
+ * You can call scheduleSession() whenever a session becomes "accepted"/"scheduled"
+ * or when its time changes; it will re-schedule timers.
  */
 export default function createScheduler(io) {
-  const timers = new Map(); // sessionId -> node timeout
+  // Map<sessionId, { preTimer?: NodeJS.Timeout, endTimer?: NodeJS.Timeout }>
+  const timers = new Map();
 
-  const _toMs = (session) => {
-    const candidates = [
-      session?.scheduledAt,
-      session?.startAt,
-      session?.scheduled_at,
-      session?.final?.date && session?.final?.time && `${session.final.date}T${session.final.time}`,
-      session?.final?.date,
-      session?.createdAt,
-    ];
-    for (const c of candidates) {
-      if (!c) continue;
-      try {
-        // if it's a Date object or ISO string or number
-        const t = typeof c === "number" ? c : (c instanceof Date ? c.getTime() : Date.parse(String(c)));
-        if (!Number.isNaN(t)) return t;
-      } catch (e) {
-        continue;
-      }
-    }
-    return null;
-  };
+  /* ------------------------------ Helpers ------------------------------ */
 
-  // small helper: determine final date & time strings for a session doc
-  function _finalDateTimeFromSession(session) {
-    if (session?.final?.date && session?.final?.time) return { date: session.final.date, time: session.final.time };
-    if (session?.scheduledAt) {
-      const d = new Date(session.scheduledAt);
-      const date = d.toISOString().split("T")[0];
-      const hh = String(d.getHours()).padStart(2, "0");
-      const mm = String(d.getMinutes()).padStart(2, "0");
-      return { date, time: `${hh}:${mm}` };
+  function parseStartEnd(session) {
+    // Prefer ISO fields (added in updated model)
+    let startISO = session?.final?.startISO || null;
+    let endISO   = session?.final?.endISO   || null;
+
+    // Fallback: derive from date/time if ISO isn't present
+    if ((!startISO || !endISO) && session?.final?.date && session?.final?.time) {
+      const { startISO: sISO, endISO: eISO } = deriveISO(
+        session.final.date,
+        session.final.time,
+        session.final.durationMinutes || 30
+      );
+      startISO = startISO || sISO;
+      endISO   = endISO   || eISO;
     }
-    return null;
+
+    const startMs = startISO ? Date.parse(startISO) : null;
+    const endMs   = endISO   ? Date.parse(endISO)   : null;
+
+    return { startISO, endISO, startMs, endMs };
   }
 
-  async function _ensureMeetingLink(sessionDoc) {
+  function deriveISO(dateStr, timeStr, durationMinutes = 30) {
+    let sh = 0, sm = 0, dur = durationMinutes;
+    if (timeStr?.includes("-")) {
+      const [s, e] = timeStr.split("-");
+      const [h1, m1] = s.split(":").map(Number);
+      const [h2, m2] = e.split(":").map(Number);
+      sh = h1 || 0; sm = m1 || 0;
+      const diff = (h2 * 60 + (m2 || 0)) - (sh * 60 + sm);
+      if (diff > 0) dur = diff;
+    } else if (timeStr) {
+      const [h, m] = timeStr.split(":").map(Number);
+      sh = h || 0; sm = m || 0;
+    }
+    const [Y, M, D] = dateStr.split("-").map(Number);
+    const start = new Date(Date.UTC(Y, (M - 1), D, sh, sm, 0));
+    const end   = new Date(start.getTime() + dur * 60000);
+    return { startISO: start.toISOString(), endISO: end.toISOString() };
+  }
+
+  function emitToUsers(sessionId, studentId, volunteerId, event, payload) {
     try {
-      // If session.final.zoomLink exists -- check expiry if present (we only have zoomLink in schema).
-      // We'll generate a new joinUrl only if there isn't one already.
-      if (sessionDoc?.final?.zoomLink) {
-        return { joinUrl: sessionDoc.final.zoomLink, generated: false };
-      }
-
-      // Compose topic/date/time for stub.
-      const fd = _finalDateTimeFromSession(sessionDoc) || {};
-      const topic = sessionDoc?.subject || `Session-${String(sessionDoc?._id || "")}`;
-      const date = fd.date || null;
-      const time = fd.time || null;
-
-      // Try to create a real Zoom meeting (currently stub)
-      const zoom = await createZoomMeetingStub({ topic, date, time, durationMinutes: 30 }).catch(() => null);
-      if (zoom && zoom.joinUrl) {
-        // Save to DB safely (only update final.zoomLink - schema allows zoomLink)
-        try {
-          const sr = await SessionRequest.findById(sessionDoc._id);
-          if (sr) {
-            sr.final = sr.final || {};
-            sr.final.zoomLink = zoom.joinUrl;
-            await sr.save();
-          }
-        } catch (e) {
-          console.warn("scheduler: failed to persist zoomLink to SessionRequest:", e?.message || e);
-        }
-        return { joinUrl: zoom.joinUrl, meta: zoom, generated: true };
-      }
-
-      // Fallback: internal link
-      const internal = await createInternalMeetingLink({ sessionId: String(sessionDoc._id) }).catch(() => null);
-      if (internal && internal.joinUrl) {
-        try {
-          const sr = await SessionRequest.findById(sessionDoc._id);
-          if (sr) {
-            sr.final = sr.final || {};
-            sr.final.zoomLink = internal.joinUrl;
-            await sr.save();
-          }
-        } catch (e) {
-          console.warn("scheduler: failed to persist internal link to SessionRequest:", e?.message || e);
-        }
-        return { joinUrl: internal.joinUrl, meta: internal, generated: true };
-      }
-
-      return { joinUrl: null, generated: false };
-    } catch (err) {
-      console.warn("scheduler._ensureMeetingLink failed:", err?.message || err);
-      return { joinUrl: null, generated: false };
+      if (studentId)   io.to(`user:${String(studentId)}`).emit(event, payload);
+      if (volunteerId) io.to(`user:${String(volunteerId)}`).emit(event, payload);
+    } catch (e) {
+      console.warn(`scheduler emit failed (${event})`, e?.message || e);
     }
   }
 
-  function scheduleSessionStart(session = {}) {
+  function clearTimers(sessionId) {
+    const t = timers.get(sessionId);
+    if (!t) return;
+    if (t.preTimer) clearTimeout(t.preTimer);
+    if (t.endTimer) clearTimeout(t.endTimer);
+    timers.delete(sessionId);
+  }
+
+  /* --------------------------- Core scheduling --------------------------- */
+
+  /**
+   * Schedules BOTH:
+   *  - T-10 minute "window open" ping → event: "session:window_open"
+   *  - Auto end at session end → ends Zoom + marks status "completed"
+   */
+  async function scheduleSession(sessionLike = {}) {
     try {
-      const sid = String(session._id || session.id || session.requestId || session.sessionId || "");
-      if (!sid) {
+      const sessionId = String(
+        sessionLike?._id || sessionLike?.id || sessionLike?.requestId || sessionLike?.sessionId || ""
+      );
+      if (!sessionId) {
         console.warn("scheduler: missing session id");
-        return;
+        return { scheduled: false, reason: "no-session-id" };
       }
 
-      const startMs = _toMs(session);
-      if (startMs === null) {
-        console.warn("scheduler: no recognizable start time for session", sid);
-        return;
+      // Load the latest from DB to avoid stale times
+      let s;
+      try {
+        s = await SessionRequest.findById(sessionId).lean();
+      } catch (e) {
+        console.warn("scheduler: failed to load session from DB:", e?.message || e);
+        return { scheduled: false, reason: "not-found" };
       }
+      if (!s) return { scheduled: false, reason: "not-found" };
+
+      const { startMs, endMs } = parseStartEnd(s);
+      if (!startMs || !endMs) {
+        console.warn("scheduler: missing start/end for", sessionId);
+        return { scheduled: false, reason: "no-time" };
+      }
+
+      // Clear any existing timers for this session
+      clearTimers(sessionId);
 
       const now = Date.now();
-      const delay = Math.max(0, startMs - now);
 
-      // clear existing timer if present
-      if (timers.has(sid)) {
-        clearTimeout(timers.get(sid));
-        timers.delete(sid);
-      }
-
-      // set timeout
-      const t = setTimeout(async () => {
+      // PRE-START: T-10 min window ping (never schedule in the past)
+      const preAt = Math.max(0, startMs - 10 * 60 * 1000 - now);
+      const preTimer = setTimeout(async () => {
         try {
-          // Reload session from DB for latest data
-          let sessionDoc = null;
-          try {
-            if (mongoose.Types.ObjectId.isValid(sid)) sessionDoc = await SessionRequest.findById(sid).lean();
-            else sessionDoc = await SessionRequest.findOne({ _id: sid }).lean();
-          } catch (e) {
-            console.warn("scheduler: failed to load session from DB:", e?.message || e);
-          }
-
-          // Build payload base
+          // Reload minimal identifiers for emit
+          const fresh = await SessionRequest.findById(sessionId, "student volunteer final").lean();
           const payload = {
-            sessionId: sid,
+            sessionId,
             startAt: new Date(startMs).toISOString(),
-            student: sessionDoc?.student ? String(sessionDoc.student) : (session.student ? String(session.student) : null),
-            volunteer: sessionDoc?.volunteer ? String(sessionDoc.volunteer) : (session.volunteer ? String(session.volunteer) : null),
-            roomId: sessionDoc?.sessionRoomId || session?.sessionRoomId || session.roomId || null,
-            final: sessionDoc?.final || session?.final || null,
+            windowOpensAt: new Date(Date.now()).toISOString(),
+            final: fresh?.final || null,
           };
-
-          // Ensure meeting link exists (generate just-in-time if needed)
-          const ensure = await _ensureMeetingLink(sessionDoc || session);
-
-          // If ensure provided a joinUrl, attach to payload
-          if (ensure?.joinUrl) {
-            payload.meeting = {
-              joinUrl: ensure.joinUrl,
-              generatedJustNow: Boolean(ensure.generated),
-              meta: ensure.meta || null,
-            };
-          } else if (payload.final?.zoomLink) {
-            payload.meeting = { joinUrl: payload.final.zoomLink, generatedJustNow: false };
-          }
-
-          // Emit notifications / socket events
-          try {
-            if (payload.student) io.to(`user:${String(payload.student)}`).emit("session:starting", payload);
-            if (payload.volunteer) io.to(`user:${String(payload.volunteer)}`).emit("session:starting", payload);
-
-            // separate event with meeting link so frontend can react specifically
-            if (payload.meeting?.joinUrl) {
-              if (payload.student) io.to(`user:${String(payload.student)}`).emit("session:meeting_link", payload);
-              if (payload.volunteer) io.to(`user:${String(payload.volunteer)}`).emit("session:meeting_link", payload);
-            }
-
-            // room-level event
-            if (payload.roomId) io.to(String(payload.roomId)).emit("session:starting", payload);
-            if (payload.roomId && payload.meeting?.joinUrl) io.to(String(payload.roomId)).emit("session:meeting_link", payload);
-          } catch (e) {
-            console.warn("scheduler: emit failed", e?.message || e);
-          }
-
-          // Optionally update DB state or mark "startedAt" (safe non-strict update)
-          // If you'd like to record startedAt, you can uncomment the following:
-          /*
-          try {
-            await SessionRequest.findByIdAndUpdate(sid, { $set: { startedAt: new Date() } }, { new: true }).exec();
-          } catch (e) {
-            console.warn("scheduler: failed to persist startedAt:", e?.message || e);
-          }
-          */
-
+          emitToUsers(sessionId, fresh?.student, fresh?.volunteer, "session:window_open", payload);
         } catch (e) {
-          console.warn("scheduler timeout handler failed", e?.message || e);
-        } finally {
-          timers.delete(sid);
+          console.warn("scheduler: preStart handler failed", e?.message || e);
         }
-      }, delay);
+      }, preAt);
 
-      timers.set(sid, t);
-      // return ms delay for debug
-      return { scheduled: true, sessionId: sid, runInMs: delay };
+      // END: auto-end exactly at endMs (never schedule in the past)
+      const endDelay = Math.max(0, endMs - now);
+      const endTimer = setTimeout(async () => {
+        try {
+          // Load full doc to end meeting and update status
+          const doc = await SessionRequest.findById(sessionId);
+          if (!doc) return;
+
+          // Attempt to end Zoom meeting if it exists
+          const meetingId = doc?.zoomMeeting?.meetingId;
+          if (meetingId) {
+            try {
+              await endMeeting(meetingId);
+            } catch (e) {
+              console.warn("scheduler: endMeeting failed (continuing):", e?.message || e);
+            }
+          }
+
+          // Mark completed if not already completed/cancelled
+          if (!["completed", "cancelled"].includes(doc.status)) {
+            doc.status = "completed";
+            await doc.save();
+          }
+
+          // Emit "session:ended" so clients can close UI
+          const payload = {
+            sessionId,
+            endedAt: new Date().toISOString(),
+            meetingId: meetingId || null,
+          };
+          emitToUsers(sessionId, doc?.student, doc?.volunteer, "session:ended", payload);
+        } catch (e) {
+          console.warn("scheduler: end handler failed", e?.message || e);
+        } finally {
+          clearTimers(sessionId);
+        }
+      }, endDelay);
+
+      timers.set(sessionId, { preTimer, endTimer });
+
+      return {
+        scheduled: true,
+        sessionId,
+        preRunsInMs: preAt,
+        endRunsInMs: endDelay,
+      };
     } catch (e) {
-      console.error("scheduleSessionStart fail", e);
+      console.error("scheduleSession fail", e);
+      return { scheduled: false, reason: "exception" };
     }
   }
 
   function cancelSession(sessionOrId) {
-    const sid = String(
-      (typeof sessionOrId === "string" || typeof sessionOrId === "number")
+    const sessionId = String(
+      typeof sessionOrId === "string" || typeof sessionOrId === "number"
         ? sessionOrId
         : sessionOrId?._id || sessionOrId?.id || sessionOrId?.requestId || ""
     );
-    if (!sid) return;
-    if (timers.has(sid)) {
-      clearTimeout(timers.get(sid));
-      timers.delete(sid);
-    }
+    if (!sessionId) return { cancelled: false, reason: "no-session-id" };
+    clearTimers(sessionId);
+    return { cancelled: true, sessionId };
   }
 
   function clearAll() {
-    for (const t of timers.values()) clearTimeout(t);
+    for (const t of timers.values()) {
+      if (t.preTimer) clearTimeout(t.preTimer);
+      if (t.endTimer) clearTimeout(t.endTimer);
+    }
     timers.clear();
   }
 
-  return { scheduleSessionStart, cancelSession, clearAll };
+  return {
+    scheduleSession,
+    cancelSession,
+    clearAll,
+  };
 }
+
+/* ------------------------------- (Optional) ------------------------------- */
+/**
+ * If you want to also schedule a "session:starting" event exactly at start time,
+ * add a third timer like the two above and emit that event. The UI can then auto-switch
+ * from countdown → “Join/Start” view when the clock hits zero.
+ */

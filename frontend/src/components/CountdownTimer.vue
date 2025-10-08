@@ -22,20 +22,35 @@
 import { ref, onMounted, onBeforeUnmount, watch, computed } from "vue";
 
 const props = defineProps({
-  // Scheduled start time: ISO string or ms timestamp
+  /** Scheduled start time: ISO string, ms timestamp, or Date */
   startAt: { type: [String, Number, Date], required: true },
-  // If true, continue ticking even after overdue
+  /** Optional end time (ISO/ms/Date). If not provided, we'll use startAt + windowAfterMin */
+  endAt: { type: [String, Number, Date], default: null },
+  /** If true, keep counting into negative territory (overdue) */
   showOverdue: { type: Boolean, default: false },
-  // Tick interval (ms)
+  /** Tick interval (ms) */
   tickMs: { type: Number, default: 1000 },
+  /** Minutes before start when the "join window" opens */
+  windowBeforeMin: { type: Number, default: 10 },
+  /** Minutes after start when the "join window" closes (if endAt not provided) */
+  windowAfterMin: { type: Number, default: 60 },
 });
 
-const emit = defineEmits(["started", "tick"]);
+const emit = defineEmits([
+  "started",       // when we cross startAt
+  "tick",          // every tick with remaining structure
+  "window-open",   // when now enters [startAt - windowBeforeMin, end]
+  "window-close",  // when now leaves the window
+  "ended"          // when we pass endAt (or start+afterMin)
+]);
 
 const timeLeft = ref({ total: 0, days: 0, hours: 0, minutes: 0, seconds: 0 });
 let intervalId = null;
 let reachedZero = false;
+let windowIsOpen = false;
+let endedEmitted = false;
 
+/* ------------------------ utils ------------------------ */
 function compute(ms) {
   const total = ms;
   const absTotal = Math.abs(Math.floor(total));
@@ -51,38 +66,83 @@ function pad(n) {
   return String(n).padStart(2, "0");
 }
 
-function parseStartAt() {
-  if (props.startAt instanceof Date) return props.startAt.getTime();
-  if (typeof props.startAt === "number") return props.startAt;
-  const p = Date.parse(props.startAt);
+function parseTs(v) {
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === "number") return v;
+  const p = Date.parse(v);
   return Number.isNaN(p) ? null : p;
 }
 
+const startMs = computed(() => parseTs(props.startAt));
+const explicitEndMs = computed(() => (props.endAt ? parseTs(props.endAt) : null));
+
+/** End boundary for window/ended logic */
+const windowEndMs = computed(() => {
+  if (explicitEndMs.value) return explicitEndMs.value;
+  if (startMs.value == null) return null;
+  return startMs.value + props.windowAfterMin * 60 * 1000;
+});
+
+/** Start boundary for window logic */
+const windowOpenMs = computed(() => {
+  if (startMs.value == null) return null;
+  return startMs.value - props.windowBeforeMin * 60 * 1000;
+});
+
+/* ------------------------ main updater ------------------------ */
 function update() {
-  const startMs = parseStartAt();
-  if (startMs === null) {
+  // compute countdown to start
+  const sMs = startMs.value;
+  if (sMs === null) {
     timeLeft.value = compute(0);
     return;
   }
 
   const now = Date.now();
-  const diff = startMs - now;
-  const total = props.showOverdue ? diff : Math.max(0, diff);
+  const diffToStart = sMs - now;
+  const total = props.showOverdue ? diffToStart : Math.max(0, diffToStart);
 
   timeLeft.value = compute(total);
+  emit("tick", { ...timeLeft.value, now: new Date(now).toISOString() });
 
-  emit("tick", { ...timeLeft.value });
-
-  if (!reachedZero && diff <= 0) {
+  // START reached
+  if (!reachedZero && diffToStart <= 0) {
     reachedZero = true;
-    emit("started", { startAt: new Date(startMs).toISOString() });
+    emit("started", { startAt: new Date(sMs).toISOString() });
     if (!props.showOverdue && intervalId) {
-      clearInterval(intervalId);
-      intervalId = null;
+      // NOTE: we do NOT stop interval because we still need window-open/close events after start.
+      // If you want the original behavior (stop at start when showOverdue=false), uncomment below:
+      // clearInterval(intervalId); intervalId = null;
     }
+  }
+
+  // WINDOW open/close transitions
+  if (windowOpenMs.value != null && windowEndMs.value != null) {
+    const inWindow = now >= windowOpenMs.value && now <= windowEndMs.value;
+    if (inWindow && !windowIsOpen) {
+      windowIsOpen = true;
+      emit("window-open", {
+        openAt: new Date(windowOpenMs.value).toISOString(),
+        closeAt: new Date(windowEndMs.value).toISOString(),
+      });
+    } else if (!inWindow && windowIsOpen) {
+      windowIsOpen = false;
+      emit("window-close", {
+        closedAt: new Date(now).toISOString(),
+      });
+    }
+  }
+
+  // ENDED event
+  if (windowEndMs.value != null && !endedEmitted && now > windowEndMs.value) {
+    endedEmitted = true;
+    emit("ended", {
+      endAt: new Date(windowEndMs.value).toISOString(),
+    });
   }
 }
 
+/* ------------------------ lifecycle ------------------------ */
 onMounted(() => {
   update();
   intervalId = setInterval(update, props.tickMs);
@@ -92,12 +152,17 @@ onBeforeUnmount(() => {
   if (intervalId) clearInterval(intervalId);
 });
 
-watch(() => props.startAt, () => {
+watch([() => props.startAt, () => props.endAt, () => props.windowBeforeMin, () => props.windowAfterMin], () => {
+  // reset state on schedule changes
   reachedZero = false;
+  windowIsOpen = false;
+  endedEmitted = false;
+
   update();
   if (!intervalId) intervalId = setInterval(update, props.tickMs);
 });
 
+/* ------------------------ computed strings ------------------------ */
 const overdueText = computed(() => {
   if (timeLeft.value.total >= 0) return "";
   const tf = timeLeft.value;

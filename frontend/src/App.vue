@@ -1661,41 +1661,70 @@ async function sendSessionRequest() {
   } catch (e) { alert(e.message) }
 }
 
+// Helper to build ISO date string from separate date and time strings
+function buildIsoFromDateTime(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null
+  try {
+    const d = (() => {
+      const parts = dateStr.split('-').map(Number)
+      if (parts.length !== 3) return null
+      const [y, m, day] = parts
+      const t = String(timeStr).split('-')[0].trim()
+      const [hh, mm] = t.split(':').map(Number)
+      if (Number.isNaN(hh) || Number.isNaN(mm)) return null
+      return new Date(y, m - 1, day, hh, mm, 0)
+    })()
+    return d ? d.toISOString() : null
+  } catch {
+    return null
+  }
+}
+
 // my requests
 async function loadMyRequests() {
   try {
     const data = await api('/sessions/mine', { method: 'GET' })
-    myRequests.value = Array.isArray(data) 
-      ? data.map(request => {
-          // Helper to parse date and time into ISO string
-          const parseDateTime = (dateStr, timeStr) => {
-            if (!dateStr || !timeStr) return null;
-            // Handle both 'HH:MM' and 'HH:MM-HH:MM' time formats
-            const timePart = timeStr.includes('-') ? timeStr.split('-')[0] : timeStr;
-            return new Date(`${dateStr}T${timePart}:00`).toISOString();
-          };
-          
-          // Determine the start time, checking multiple possible locations
-          let startAt = request.scheduledAt || 
-                       parseDateTime(request.final?.date, request.final?.time) ||
-                       parseDateTime(request.date, request.time);
-          
-          return {
-            ...request,
-            startAt,
-            // Ensure we have a proper date object for sorting
-            _sortDate: startAt ? new Date(startAt) : new Date(0)
-          };
-        }).sort((a, b) => {
-          // Sort by status (pending first) then by date (earliest first)
-          if (a.status === 'pending' && b.status !== 'pending') return -1;
-          if (a.status !== 'pending' && b.status === 'pending') return 1;
-          return a._sortDate - b._sortDate;
-        })
-      : [];
-  } catch (e) { 
-    console.error('Failed to load requests:', e);
-    alert(e.message || 'Failed to load session requests');
+    if (!Array.isArray(data)) { myRequests.value = []; return }
+    
+    // compute startAt consistently
+    const normalized = data.map(req => {
+      // priority: scheduledAt -> final.date+time -> date+time -> startAt
+      let iso = null
+      if (req.scheduledAt) {
+        const d = (typeof req.scheduledAt === 'number') ? new Date(req.scheduledAt) : new Date(req.scheduledAt)
+        if (!Number.isNaN(d.getTime())) iso = d.toISOString()
+      }
+      if (!iso && req.final?.date && req.final?.time) {
+        iso = buildIsoFromDateTime(req.final.date, req.final.time)
+      }
+      if (!iso && req.date && req.time) {
+        iso = buildIsoFromDateTime(req.date, req.time)
+      }
+      if (!iso && req.startAt) {
+        const d = (typeof req.startAt === 'number') ? new Date(req.startAt) : new Date(req.startAt)
+        if (!Number.isNaN(d.getTime())) iso = d.toISOString()
+      }
+      const sortTime = iso ? new Date(iso).getTime() : Infinity
+      return { ...req, startAt: iso, _sortDate: sortTime }
+    })
+
+    // ordering by status weight then by time
+    const statusWeight = s => {
+      if (s === 'pending') return 0
+      if (s === 'scheduled') return 1
+      if (s === 'accepted') return 2
+      if (s === 'completed') return 3
+      return 4
+    }
+
+    myRequests.value = normalized.sort((a, b) => {
+      const wa = statusWeight(a.status), wb = statusWeight(b.status)
+      if (wa !== wb) return wa - wb
+      return (a._sortDate || 0) - (b._sortDate || 0)
+    })
+  } catch (e) {
+    console.error('Failed to load requests:', e)
+    alert(e.message || 'Failed to load session requests')
   }
 }
 async function acceptRequest(requestId) {
@@ -2194,11 +2223,52 @@ function updateSessionInList(updated) {
   if (!updated || !updated._id) return;
   const id = String(updated._id);
   const idx = myRequests.value.findIndex(r => String(r._id) === id);
-  if (idx !== -1) {
-    myRequests.value[idx] = { ...myRequests.value[idx], ...updated };
-  } else {
-    myRequests.value.unshift(updated); // add new updates at top
+  
+  // regenerate normalized startAt/_sortDate for updated item (same logic as loadMyRequests)
+  const computeIsoFor = (req) => {
+    if (req.scheduledAt) {
+      const d = (typeof req.scheduledAt === 'number') ? new Date(req.scheduledAt) : new Date(req.scheduledAt)
+      if (!Number.isNaN(d.getTime())) return d.toISOString()
+    }
+    if (req.final?.date && req.final?.time) {
+      const iso = buildIsoFromDateTime(req.final.date, req.final.time)
+      if (iso) return iso
+    }
+    if (req.date && req.time) {
+      const iso = buildIsoFromDateTime(req.date, req.time)
+      if (iso) return iso
+    }
+    if (req.startAt) {
+      const d = (typeof req.startAt === 'number') ? new Date(req.startAt) : new Date(req.startAt)
+      if (!Number.isNaN(d.getTime())) return d.toISOString()
+    }
+    return null
   }
+
+  const iso = computeIsoFor(updated)
+  const normalized = { ...updated, startAt: iso, _sortDate: iso ? new Date(iso).getTime() : Infinity }
+
+  if (idx !== -1) {
+    // replace in-place
+    myRequests.value[idx] = { ...myRequests.value[idx], ...normalized }
+  } else {
+    // new: add to top
+    myRequests.value.unshift(normalized)
+  }
+
+  // re-sort according to same rules used in loadMyRequests
+  const statusWeight = s => {
+    if (s === 'pending') return 0
+    if (s === 'scheduled') return 1
+    if (s === 'accepted') return 2
+    if (s === 'completed') return 3
+    return 4
+  }
+  myRequests.value.sort((a, b) => {
+    const wa = statusWeight(a.status), wb = statusWeight(b.status)
+    if (wa !== wb) return wa - wb
+    return (a._sortDate || 0) - (b._sortDate || 0)
+  })
 }
 
 // Handle starting a video call with a user

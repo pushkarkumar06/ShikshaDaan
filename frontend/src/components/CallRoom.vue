@@ -17,12 +17,20 @@
           <button @click="toggleVideo">{{ localVideoEnabled ? 'Stop Video' : 'Start Video' }}</button>
           <button @click="toggleScreenShare">{{ screenSharing ? 'Stop Share' : 'Share Screen' }}</button>
 
+          <!-- If Zoom link already present -->
           <button v-if="joinableExternally" @click="openExternal" class="secondary">
-            Join (external)
+            {{ isHost ? 'Start (Zoom)' : 'Join (Zoom)' }}
           </button>
 
-          <button v-if="sessionId && !joinableExternally" @click="generateAndOpenJoinLink" class="secondary">
-            Generate & Join
+          <!-- If no Zoom link yet, let user generate it (server enforces time window) -->
+          <button
+            v-if="sessionId && !joinableExternally"
+            @click="generateAndOpenJoinLink"
+            class="secondary"
+            :disabled="generating"
+          >
+            <span v-if="generating">Working…</span>
+            <span v-else>Generate & Join</span>
           </button>
 
           <button class="danger" @click="leave">Leave</button>
@@ -50,34 +58,40 @@
 
 <script setup>
 /*
-  Enhanced CallRoom:
-  - Accepts props: roomId (required), userInfo, wsUrl (optional), token (optional JWT),
-    sessionId (optional) and externalJoinLink (optional).
-  - If externalJoinLink provided (e.g. Zoom link on session), "Join (external)" opens it.
-  - If no external link and sessionId provided, you can call POST /api/sessions/:id/join to generate a link.
-  - Uses Socket.IO for in-app WebRTC signaling and gracefully handles getUserMedia permission errors.
+  CallRoom (Zoom-ready):
+  - Props:
+      roomId (required), userInfo, wsUrl?, token?, sessionId?, externalJoinLink?, isHost?
+  - If externalJoinLink provided → open in new tab (Zoom).
+  - If sessionId provided but no link → POST /api/rtc/zoom/meeting; fallback GET /api/sessions/:id/join
+  - Listens for socket session events: meeting_link, ended, window_open
+  - Keeps in-app WebRTC as fallback (TURN recommended for prod).
 */
 
-import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue';
+import { ref, reactive, onMounted, onBeforeUnmount } from 'vue';
 import { io } from 'socket.io-client';
 import VideoTile from './VideoTile.vue';
 
-// props
 const props = defineProps({
   roomId: { type: String, required: true },
-  userInfo: { type: Object, default: () => ({ id: null, name: null }) },
+  userInfo: { type: Object, default: () => ({ id: null, name: null, role: null }) },
   wsUrl: { type: String, default: null },
   token: { type: String, default: null },
-  sessionId: { type: String, default: null },           // optional: session tied to this room
-  externalJoinLink: { type: String, default: null },    // optional: e.g. zoom link
+  sessionId: { type: String, default: null },           // session tied to this room
+  externalJoinLink: { type: String, default: null },    // pre-existing Zoom join URL (or start URL for host)
+  isHost: { type: Boolean, default: false }             // volunteer=true => open startUrl when available
 });
 
-const emit = defineEmits(['left', 'error', 'joined']);
+const emit = defineEmits(['left', 'error', 'joined', 'zoom:opened', 'zoom:generated']);
 
-// computed-ish refs
-const WS_URL = props.wsUrl || (window.location.protocol + '//' + window.location.hostname + (window.location.port ? ':' + window.location.port : ''));
+/* ------------------- env / auth helpers ------------------- */
+const WS_URL = props.wsUrl || import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 
-// refs/state
+function getAuthToken() {
+  if (props.token) return props.token;
+  try { return localStorage.getItem('token') || ''; } catch { return ''; }
+}
+
+/* ------------------- media / webrtc state ------------------- */
 const localVideo = ref(null);
 const localStream = ref(null);
 const localAudioEnabled = ref(true);
@@ -87,27 +101,25 @@ const permissionError = ref('');
 const remoteStreams = reactive({}); // peerId -> { stream, label }
 const pcs = {}; // peerId -> RTCPeerConnection
 
-// local identity
 const myId = props.userInfo?.id || props.userInfo?.userId || null;
 const myName = props.userInfo?.name || props.userInfo?.userName || 'User';
+const myRole = (props.userInfo?.role || '').toLowerCase();
 
-// socket with auth header if token provided
 const socketOptions = {
   transports: ['websocket', 'polling'],
-  auth: props.token ? { token: props.token } : {},
+  auth: getAuthToken() ? { token: getAuthToken() } : {},
   autoConnect: false,
 };
 const socket = io(WS_URL, socketOptions);
 
-// simple STUN-only config (add TURN servers for production)
+// STUN (add TURN servers for production)
 const pcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
-// helpers
 function safeLog(...args) { try { console.debug(...args); } catch {} }
 
+/* ------------------- local media ------------------- */
 async function startLocalMedia() {
   permissionError.value = '';
-  // request audio+video with retries for user-friendly errors
   try {
     const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     localStream.value = s;
@@ -116,9 +128,8 @@ async function startLocalMedia() {
     localVideoEnabled.value = !!s.getVideoTracks().length && s.getVideoTracks()[0].enabled;
     return true;
   } catch (err) {
-    // handle permission denied vs not-available
     if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
-      permissionError.value = 'Permission denied: camera/microphone access is required for in-app calls. You can still join via external link.';
+      permissionError.value = 'Permission denied: camera/microphone access is required for in-app calls. You can still join via Zoom.';
       emit('error', { code: 'perm_denied', error: err });
     } else {
       permissionError.value = 'Unable to access camera/microphone. Check device and browser settings.';
@@ -129,24 +140,21 @@ async function startLocalMedia() {
   }
 }
 
+/* ------------------- peer connections ------------------- */
 function createPeerConnection(peerId) {
   if (pcs[peerId]) return pcs[peerId];
   const pc = new RTCPeerConnection(pcConfig);
 
-  // add local tracks when available
   if (localStream.value) {
     localStream.value.getTracks().forEach(track => pc.addTrack(track, localStream.value));
   }
 
   pc.ontrack = (ev) => {
     const ms = (ev.streams && ev.streams[0]) ? ev.streams[0] : new MediaStream();
-    // set or merge stream
     if (!remoteStreams[peerId]) {
       remoteStreams[peerId] = { stream: ms, label: `peer:${peerId}` };
     } else {
-      try {
-        ev.streams[0].getTracks().forEach(t => remoteStreams[peerId].stream.addTrack(t));
-      } catch (e) { /* ignore */ }
+      try { ev.streams[0].getTracks().forEach(t => remoteStreams[peerId].stream.addTrack(t)); } catch {}
     }
   };
 
@@ -171,23 +179,20 @@ function createPeerConnection(peerId) {
 function removePeer(peerId) {
   const pc = pcs[peerId];
   if (pc) {
-    try { pc.close(); } catch (e) {}
+    try { pc.close(); } catch {}
     delete pcs[peerId];
   }
   if (remoteStreams[peerId]) delete remoteStreams[peerId];
 }
 
-// signaling handlers
+/* ------------------- socket signaling (in-app rtc) ------------------- */
 socket.on('connect', () => {
   safeLog('call socket connected', socket.id);
-  // join only after local media ready — parent already starts mounted flow
   socket.emit('call:join', { roomId: props.roomId, userId: myId || socket.id, name: myName });
 });
 
 socket.on('call:ready', async ({ peerId, name }) => {
   if (!peerId || peerId === (myId || socket.id)) return;
-  safeLog('call:ready from', peerId, name);
-
   const pc = createPeerConnection(peerId);
   try {
     const offer = await pc.createOffer();
@@ -201,7 +206,6 @@ socket.on('call:ready', async ({ peerId, name }) => {
 
 socket.on('call:offer', async ({ from, offer }) => {
   if (!from || from === (myId || socket.id)) return;
-  safeLog('received offer from', from);
   const pc = createPeerConnection(from);
   try {
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
@@ -217,7 +221,7 @@ socket.on('call:offer', async ({ from, offer }) => {
 socket.on('call:answer', async ({ from, answer }) => {
   if (!from || from === (myId || socket.id)) return;
   const pc = pcs[from];
-  if (!pc) return safeLog('no pc for answer from', from);
+  if (!pc) return;
   try {
     await pc.setRemoteDescription(new RTCSessionDescription(answer));
   } catch (e) {
@@ -242,7 +246,39 @@ socket.on('call:leave', ({ userId }) => {
   removePeer(pid);
 });
 
-// UI actions
+/* ------------------- session + Zoom socket events ------------------- */
+socket.on('session:meeting_link', (payload = {}) => {
+  // payload.meeting.joinUrl / meta.startUrl
+  try {
+    const joinUrl = payload?.meeting?.joinUrl || payload?.meeting?.meta?.joinUrl || null;
+    const startUrl = payload?.meeting?.meta?.startUrl || null;
+    if (joinUrl || startUrl) {
+      // Prefer host startUrl when isHost, else joinUrl
+      const url = props.isHost ? (startUrl || joinUrl) : (joinUrl || startUrl);
+      if (url) {
+        joinableExternally.value = true;
+        cachedZoom.joinUrl = joinUrl || cachedZoom.joinUrl || null;
+        cachedZoom.startUrl = startUrl || cachedZoom.startUrl || null;
+        window.open(url, '_blank');
+        emit('zoom:opened', { fromSocket: true, url });
+      }
+    }
+  } catch {}
+});
+
+socket.on('session:ended', ({ sessionId } = {}) => {
+  // Ended on server → leave in-app
+  if (sessionId && props.sessionId && String(sessionId) !== String(props.sessionId)) return;
+  leave();
+});
+
+socket.on('session:window_open', ({ sessionId } = {}) => {
+  // Optional: could pre-enable a UI flag
+  if (sessionId && props.sessionId && String(sessionId) !== String(props.sessionId)) return;
+  safeLog('session window opened for', sessionId || '(unknown)');
+});
+
+/* ------------------- UI controls ------------------- */
 function toggleAudio() {
   if (!localStream.value) return;
   const t = localStream.value.getAudioTracks()[0];
@@ -288,71 +324,110 @@ function stopScreenShare() {
 }
 
 function leave() {
-  try { socket.emit('call:leave', { roomId: props.roomId, userId: myId || socket.id }); } catch (e) {}
-  // close peers
+  try { socket.emit('call:leave', { roomId: props.roomId, userId: myId || socket.id }); } catch {}
   Object.keys(pcs).forEach(id => removePeer(id));
-  // stop local tracks
   if (localStream.value) {
     localStream.value.getTracks().forEach(t => { try { t.stop(); } catch {} });
     localStream.value = null;
   }
   if (localVideo.value) localVideo.value.srcObject = null;
-  try { socket.disconnect(); } catch (e) {}
+  try { socket.disconnect(); } catch {}
   emit('left', { roomId: props.roomId });
 }
 
-// External join helpers
-const joinableExternally = ref(!!props.externalJoinLink || false);
+/* ------------------- Zoom helpers ------------------- */
+const joinableExternally = ref(!!props.externalJoinLink);
+const generating = ref(false);
+
+// cache last-known Zoom URLs from server so subsequent clicks use them
+const cachedZoom = reactive({
+  joinUrl: props.externalJoinLink || null,
+  startUrl: null
+});
 
 function openExternal() {
-  const url = props.externalJoinLink;
+  const url = props.isHost ? (cachedZoom.startUrl || cachedZoom.joinUrl || props.externalJoinLink)
+                           : (cachedZoom.joinUrl || cachedZoom.startUrl || props.externalJoinLink);
   if (!url) return alert('No external link provided.');
   window.open(url, '_blank');
+  emit('zoom:opened', { url, cached: true });
 }
 
-// If no external link but sessionId provided, call backend to generate join link
-let generating = ref(false);
+async function apiCreateOrGetZoomMeeting(sessionId) {
+  // Primary route: POST /api/rtc/zoom/meeting
+  try {
+    const res = await fetch('/api/rtc/zoom/meeting', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {})
+      },
+      body: JSON.stringify({ sessionId })
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok && data?.zoom) return data.zoom;
+    // If not ok, fall through to fallback
+  } catch (e) {
+    console.warn('zoom/meeting failed, trying fallback', e);
+  }
+
+  // Fallback route: GET /api/sessions/:id/join (also lazily creates)
+  const res2 = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/join`, {
+    method: 'GET',
+    headers: {
+      ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {})
+    }
+  });
+  const data2 = await res2.json().catch(() => null);
+  if (!res2.ok) throw new Error(data2?.message || `HTTP ${res2.status}`);
+
+  // normalize
+  return {
+    joinUrl: data2?.joinUrl || null,
+    startUrl: data2?.startUrl || null
+  };
+}
+
 async function generateAndOpenJoinLink() {
-  if (!props.sessionId) return alert('No session id available to generate link.');
+  if (!props.sessionId) return alert('No session id to generate link.');
   if (generating.value) return;
   generating.value = true;
   try {
-    const headers = {};
-    if (props.token) headers['Authorization'] = `Bearer ${props.token}`;
-    const res = await fetch(`/api/sessions/${props.sessionId}/join`, { method: 'POST', headers });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      throw new Error(txt || `Status ${res.status}`);
+    const zoom = await apiCreateOrGetZoomMeeting(props.sessionId);
+    if (!zoom?.joinUrl && !zoom?.startUrl) throw new Error('No join/start URL returned');
+
+    cachedZoom.joinUrl = zoom.joinUrl || cachedZoom.joinUrl;
+    cachedZoom.startUrl = zoom.startUrl || cachedZoom.startUrl;
+    joinableExternally.value = !!(cachedZoom.joinUrl || cachedZoom.startUrl);
+
+    const url = props.isHost ? (zoom.startUrl || zoom.joinUrl) : (zoom.joinUrl || zoom.startUrl);
+    if (url) {
+      window.open(url, '_blank');
+      emit('zoom:generated', { url, zoom });
+    } else {
+      alert('Server returned meeting but no URL.');
     }
-    const data = await res.json();
-    const link = data?.zoomLink || data?.joinUrl || data?.url;
-    if (link) window.open(link, '_blank');
-    else alert('Server did not return a join link.');
   } catch (e) {
-    console.error('generate join failed', e);
+    console.error('Failed to generate Zoom link', e);
     emit('error', { code: 'join_generate_failed', error: e });
-    alert('Failed to generate meeting link. ' + (e?.message || ''));
+    alert(e?.message || 'Failed to generate/join Zoom meeting.');
   } finally {
     generating.value = false;
   }
 }
 
-// lifecycle: start media then connect socket and emit join
+/* ------------------- lifecycle ------------------- */
 onMounted(async () => {
-  const ok = await startLocalMedia();
-  // connect socket after media attempt (even if media failed we still can join external link)
+  // Start media (even if Zoom-only, we keep fallback alive)
+  await startLocalMedia();
+
+  // Connect socket (for both in-app rtc and session events)
   try { socket.connect(); } catch (e) { console.warn('socket connect failed', e); }
 
-  // if local media available, attach tracks to any new PC created later
-  if (ok && localStream.value) {
-    // emit join (server will forward call:ready to other participants)
-    try {
-      socket.emit('call:join', { roomId: props.roomId, userId: myId || socket.id, name: myName });
-    } catch (e) { /* ignore */ }
-  }
+  // If we already have a Zoom link passed in, mark as joinable
+  if (props.externalJoinLink) joinableExternally.value = true;
 });
 
-// cleanup
 onBeforeUnmount(() => {
   leave();
 });
@@ -360,7 +435,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .call-room { padding: 12px; }
-.row { display:flex; gap:8px; align-items:center; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
 button { padding:8px 12px; border-radius:8px; border:0; background:#1f6feb; color:white; cursor:pointer; }
 button.secondary { background:#64748b; }
 button.danger { background:#ef4444; }
@@ -370,5 +445,3 @@ button.danger { background:#ef4444; }
 .small { color:#94a3b8; }
 .card { background:#fff; border-radius:10px; box-shadow:0 6px 18px rgba(2,6,23,0.06); }
 </style>
-
-
