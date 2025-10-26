@@ -1,6 +1,6 @@
 // src/schedular.js
-import SessionRequest from "./models/SessionRequest.js";        // adjust path if needed
-import { endMeeting } from "./services/zoom.js";                // adjust path if needed
+import SessionRequest from "../models/SessionRequest.js";
+import { endMeeting } from "./zoom.js";
 
 /**
  * Lightweight scheduler:
@@ -143,6 +143,21 @@ export default function createScheduler(io) {
           const doc = await SessionRequest.findById(sessionId);
           if (!doc) return;
 
+          // Expiry logic: flip to expired if nobody joined, else completed
+          if (["scheduled", "accepted", "in-progress"].includes(doc.status)) {
+            const noOneJoined = !doc.attendance?.student?.joinedAt && !doc.attendance?.volunteer?.joinedAt;
+            if (noOneJoined) {
+              doc.status = "expired";
+              await doc.save();
+              emitToUsers(sessionId, doc?.student, doc?.volunteer, "session:expired", { _id: String(doc._id), status: "expired" });
+              clearTimers(sessionId);
+              return;
+            } else if (!["completed", "cancelled"].includes(doc.status)) {
+              doc.status = "completed";
+              await doc.save();
+            }
+          }
+
           // Attempt to end Zoom meeting if it exists
           const meetingId = doc?.zoomMeeting?.meetingId;
           if (meetingId) {
@@ -151,12 +166,6 @@ export default function createScheduler(io) {
             } catch (e) {
               console.warn("scheduler: endMeeting failed (continuing):", e?.message || e);
             }
-          }
-
-          // Mark completed if not already completed/cancelled
-          if (!["completed", "cancelled"].includes(doc.status)) {
-            doc.status = "completed";
-            await doc.save();
           }
 
           // Emit "session:ended" so clients can close UI

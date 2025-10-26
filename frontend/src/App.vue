@@ -229,7 +229,15 @@
           <button class="ghost" @click="loadDayAvailability">Load Day</button>
         </div>
         <div class="row" style="margin-top:10px">
-          <button v-for="s in slotGrid" :key="s" :class="['tab', daySlots.includes(s) ? 'active' : '' ]" @click="toggleSlot(s)">{{ s }}</button>
+          <button 
+            v-for="s in slotGrid" 
+            :key="s" 
+            :class="['tab', daySlots.includes(s) ? 'active' : '' ]" 
+            @click="toggleSlot(s)"
+            :title="s"
+          >
+            {{ formatSlot12(s) }}
+          </button>
         </div>
         <div class="row" style="margin-top:10px"><button @click="saveDayReplace">Save Day (replace)</button></div>
       </div>
@@ -317,8 +325,9 @@
           :key="s" 
           :class="['tab', selectedSlot===s ? 'active' : '']"
           @click="selectedSlot = s"
+          :title="s"
         >
-          {{ s }}
+          {{ formatSlot12(s) }}
         </button>
       </div>
       <!-- Show message + Book button only if slot selected -->
@@ -465,8 +474,9 @@
             :key="s"
             :class="['tab', exploreStudentTime===s ? 'active' : '']"
             @click="exploreStudentTime = s"
+            :title="s"
           >
-            {{ s }}
+            {{ formatSlot12(s) }}
           </button>
         </div>
       </div>
@@ -533,58 +543,24 @@
 <div v-if="tab==='sessions'" class="card">
   <h2>My Session Requests</h2>
   <div class="row"><button @click="loadMyRequests">Reload</button></div>
-  <div v-for="r in myRequests" :key="r._id" class="card">
-    <div>Subject: <b>{{ r.subject }}</b></div>
-    <div>From: <b>{{ r.requestedBy?.name || 'Unknown' }}</b> ({{ r.requestedBy?.role }})</div>
-    <div>Message: {{ r.message || '-' }}</div>
-    <div>Status: {{ r.status }}</div>
-    <div v-if="r.proposed">Proposed: {{ r.proposed.date }} {{ r.proposed.time }}</div>
-    <div v-if="r.final">
-      Final: {{ r.final.date }} {{ r.final.time }}
-      <span v-if="r.final.zoomLink">
-        — <a :href="r.final.zoomLink" target="_blank" rel="noopener">Join</a>
-      </span>
-      <span v-else>
-        <!-- show Generate & Join when no zoomLink yet -->
-        <!-- Optionally restrict button visibility (participants only) -->
-        <button
-          v-if="user && (String(user._id)===String(r.student?._id||r.student) || String(user._id)===String(r.volunteer?._id||r.volunteer))"
-          @click="joinSession(r._id)"
-          style="margin-left:8px"
-        >
-          Generate & Join
-        </button>
-        <span v-else class="small" style="margin-left:8px; opacity:.8">No join link yet</span>
-      </span>
-    </div>
-    <div class="row" style="margin-top:10px; gap:6px">
-      <!-- Show Accept/Reject buttons only when request is pending, user is a participant, and both student and volunteer exist -->
-      <button 
-        v-if="user && r.status === 'pending' && r.student && r.volunteer && (String(user._id) === String(r.volunteer._id || r.volunteer) || String(user._id) === String(r.student._id || r.student))" 
-        @click="acceptSession(r)">
-        Accept
-      </button>
-      <button 
-        v-if="user && r.status === 'pending' && r.student && r.volunteer && (String(user._id) === String(r.volunteer._id || r.volunteer) || String(user._id) === String(r.student._id || r.student))" 
-        class="ghost" 
-        @click="respondToRequest(r._id, 'rejected')">
-        Reject
-      </button>
-      
-      <!-- Always show chat button -->
-      <button @click="openChatForSession(r)">Open Chat</button>
-      
-      <!-- Volunteer scheduling UI - only show when request is pending, user is the volunteer, and both student and volunteer exist -->
-      <div 
-        v-if="user && user.role === 'volunteer' && r.student && r.volunteer && String(r.volunteer._id || r.volunteer) === String(user._id) && r.status === 'pending'"
-        class="row"
-        style="gap:6px">
-        <input v-model="acceptDate" placeholder="YYYY-MM-DD" />
-        <input v-model="acceptTime" placeholder="HH:mm" />
-        <button @click="acceptRequest(r._id)">Accept & Schedule</button>
-      </div>
-    </div>
-  </div>
+
+  <div v-if="!visibleRequests.length" class="small" style="margin-top:8px">No active requests.</div>
+
+  <RequestItem
+    v-for="r in visibleRequests"
+    :key="r._id"
+    :request="r"
+    :isVolunteer="isVolunteer"
+    :currentUserId="user?._id || ''"
+    @accepted="acceptSession"
+    @rejected="(req) => respondToRequest(req, 'rejected')"
+    @cancel="cancelSession"
+    @join="(req) => joinSession(req._id)"
+    @started="(payload) => {
+      // optional: toast/log when timer hits 0
+      console.log('Session started:', payload)
+    }"
+  />
 </div>
 
 
@@ -615,8 +591,15 @@
       </template>
     </div>
 
-    <div class="row" style="margin-top:6px">
+    <div class="row" style="margin-top:6px; gap: 6px;">
       <button v-if="!n.read" @click="markNotifRead(n._id)">Mark read</button>
+      <button 
+        v-if="n.payload?.sessionId && ['session_update', 'session_accepted', 'session_scheduled'].includes(n.type)" 
+        @click="joinSession(n.payload.sessionId)"
+        class="primary"
+      >
+        Join Now
+      </button>
     </div>
   </div>
 </div>
@@ -897,16 +880,22 @@
   </div>
 </div>
 
-<!-- Video Call Room -->
-<!-- Video Call Room -->
-<div v-if="user" class="card" style="margin-top: 20px;">
-  <h2>Video Call</h2>
+<!-- Video Call Panel -->
+<div v-if="user && showCallRoom" class="card" style="margin-top:20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <h2 style="margin:0">Video Call</h2>
+    <button class="ghost" @click="() => { showCallRoom = false; callRoomSession = null }">Close</button>
+  </div>
+
   <CallRoom
-    :room-id="user._id"
-    :user-id="user._id"
-    :user-name="user.name || 'User'"
-    :user-role="user.role"
-    @leave-call="handleLeaveCall"
+    :room-id="callRoomId"
+    :user-info="myUserInfo"
+    :ws-url="WS_URL"
+    :token="token"
+    :session-id="callRoomSession?._id || callRoomSession?.id"
+    :external-join-link="callRoomSession?.final?.zoomLink || callRoomSession?.zoomLink || null"
+    @left="handleLeaveCall"
+    @error="(e) => console.warn('Call error', e)"
   />
 </div>
 
@@ -916,10 +905,10 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { io } from 'socket.io-client'
 import VolunteerProfile from './components/VolunteerProfile.vue'
+import RequestItem from './components/RequestItem.vue'
 import StudentProfile from './components/StudentProfile.vue'
 import CallRoom from './components/CallRoom.vue'
-
-
+import { localDateTimeToIso, getClientTzOffsetMinutes } from './utils/datetime'
 
 
 const API = 'http://localhost:5000/api'
@@ -940,6 +929,24 @@ const showProfileModal = ref(false)
 const currentProfile = ref(null)
 const currentProfileType = ref('') // 'volunteer' or 'student'
 const currentProfileReviews = ref([]) // for volunteer reviews
+
+// --- Call UI state (Zoom + in-app) ---
+const showCallRoom = ref(false)
+const callRoomSession = ref(null) // holds the session object we're joining (if any)
+
+// computed room id: prefer real session id, else DM room between two users
+const callRoomId = computed(() => {
+  const s = callRoomSession.value
+  if (s && (s._id || s.id)) return String(s._id || s.id)       // stable for a session
+  // ad-hoc: if you ever call startVideoCall(targetUserId) without a session
+  return user.value ? String(user.value._id) : 'room'
+})
+
+// convenience: pass user info into CallRoom
+const myUserInfo = computed(() => ({
+  id: user.value?._id || null,
+  name: user.value?.name || 'User'
+}))
 
 
 // forms
@@ -977,19 +984,45 @@ const studentRaw = ref('')
 const studentInterests = ref('')
 
 async function loadMyStudentProfile() {
-  if (!user.value) return
-  try {
-    const data = await api(`/students/${user.value._id}`, { method: 'GET' })
-    studentRaw.value = JSON.stringify(data, null, 2)
-    const profile = data || {}
+  if (!user.value) return;
 
-    studentForm.college    = profile.college || ''
-    studentForm.course     = profile.course || ''
-    studentForm.year       = profile.year || ''
-    studentForm.bio        = profile.bio || ''
-    studentForm.photoUrl   = profile.profilePicture?.url || ''
-    studentInterests.value = (profile.interests || []).join(', ')
-  } catch (e) { alert(e.message) }
+  // helper to clear the form so no stale data remains
+  const resetStudentForm = () => {
+    studentForm.college  = '';
+    studentForm.course   = '';
+    studentForm.year     = '';
+    studentForm.bio      = '';
+    studentForm.photoUrl = '';
+    studentInterests.value = '';
+    studentRaw.value = '';
+  };
+
+  try {
+    const data = await api('/students/me', { method: 'GET' });
+    // Some backends return {message: "..."} on empty; guard for that
+    if (!data || data.message) {
+      resetStudentForm();
+      return; // no alert — just show empty form for new user
+    }
+
+    studentRaw.value      = JSON.stringify(data, null, 2);
+    const p               = data || {};
+    studentForm.college   = p.college || '';
+    studentForm.course    = p.course || '';
+    studentForm.year      = p.year || '';
+    studentForm.bio       = p.bio || '';
+    studentForm.photoUrl  = p.profilePicture?.url || p.photoUrl || '';
+    studentInterests.value = (p.interests || []).join(', ');
+  } catch (e) {
+    // If server returns 404 / not found, silently reset instead of alerting
+    const msg = String(e?.message || '');
+    if (msg.includes('404') || /not found/i.test(msg)) {
+      resetStudentForm();
+      return;
+    }
+    console.error('loadMyStudentProfile failed', e);
+    alert(e.message);
+  }
 }
 
 async function saveStudentProfile() {
@@ -1032,6 +1065,9 @@ async function uploadStudentPhoto(evt) {
 
 // sessions
 const myRequests = ref([])
+const visibleRequests = computed(() => 
+  (myRequests.value || []).filter(r => r.status !== 'cancelled')
+);
 const acceptDate = ref('2025-08-27')
 const acceptTime = ref('10:30')
 const manualTargetId = ref('')  // For session request form
@@ -1203,60 +1239,64 @@ async function handleReviewSubmitted(reviewData) {
   }
 }
 
-// Handle both student and volunteer accept flows
-// sessionOrId can be either a session object or a session ID string
-async function acceptSession(sessionOrId) {
-  const sessionObj = (typeof sessionOrId === 'string') ? null : sessionOrId;
-  const id = (typeof sessionOrId === 'string') ? sessionOrId : (sessionOrId && (sessionOrId._id || sessionOrId.id));
+async function acceptSession(sessionOrId, scheduleData = {}) {
+  const id = typeof sessionOrId === 'string'
+    ? sessionOrId
+    : (sessionOrId && (sessionOrId._id || sessionOrId.id));
 
-  if (!id) {
-    console.error("acceptSession: missing session id", sessionOrId);
-    alert("Cannot accept. Session id missing.");
-    return;
-  }
+  if (!user.value) return alert('Login first');
+  if (!id) return alert('Cannot accept. Session id missing.');
 
   try {
-    // If we already have the session object, use that to decide quickly
-    let isStudentActor = false;
-    if (sessionObj) {
-      const studentId = String(sessionObj.student?._id || sessionObj.student || '');
-      isStudentActor = user.value && String(user.value._id) === studentId;
-    } else {
-      // Fetch session to decide which endpoint student/volunteer should use
-      const sr = await api(`/sessions/mine` , { method: 'GET' });
-      // NOTE: If you have a /sessions/:id GET endpoint, use that instead:
-      // const sr = await api(`/sessions/${id}` , { method: 'GET' });
-      // but if you don't have it, fallback to loadMyRequests then find the item
-      const found = (myRequests.value || []).find(r => String(r._id) === id);
-      if (found) {
-        const studentId = String(found.student?._id || found.student || '');
-        isStudentActor = user.value && String(user.value._id) === studentId;
-      } else {
-        // Safe fallback: call respond endpoint, backend will validate. We'll assume student cannot call /accept.
-        isStudentActor = (user.value && user.value.role === 'student');
+    // If we have schedule data, validate and convert to proper ISO string
+    let scheduledAt = null;
+    let tzOffsetMin = null;
+    
+    if (scheduleData.date && scheduleData.time) {
+      const sched = localDateTimeToIso(scheduleData.date, scheduleData.time);
+      if (!sched) {
+        throw new Error('Could not build scheduled time from date/time');
       }
+      scheduledAt = sched.iso;
+      tzOffsetMin = getClientTzOffsetMinutes();
     }
 
-    if (isStudentActor) {
-      // Students should use /respond for student-side accepts
-      await api(`/sessions/${id}/respond` , {
+    // Prepare the request body
+    const body = {};
+    if (scheduledAt) {
+      body.scheduledAt = scheduledAt;
+      body.tzOffsetMin = tzOffsetMin;
+    }
+
+    // Decide endpoint by role
+    if (user.value.role === 'student') {
+      // student accepts -> respond API
+      await api(`/sessions/${id}/respond`, {
         method: 'POST',
-        body: JSON.stringify({ action: 'accepted' })
+        body: JSON.stringify({ 
+          action: 'accepted',
+          ...(scheduledAt && { scheduledAt, tzOffsetMin })
+        })
       });
     } else {
-      // Volunteers/admin use the accept endpoint (can schedule too)
+      // volunteer/admin accepts -> accept API
       await api(`/sessions/${id}/accept`, {
         method: 'POST',
-        body: JSON.stringify({})
+        body: JSON.stringify(body)
       });
     }
 
-    // Refresh the UI
     await loadMyRequests();
     await loadNotifications();
+    
+    if (scheduledAt) {
+      alert(`Session accepted and scheduled for ${new Date(scheduledAt).toLocaleString()}`);
+    } else {
+      alert('Session accepted');
+    }
   } catch (err) {
-    console.error("acceptSession error", err);
-    alert(err?.message || 'Accept failed');
+    console.error('acceptSession error', err);
+    alert(err?.message || 'Failed to accept session');
   }
 }
 
@@ -1292,19 +1332,48 @@ async function api(path, options = {}) {
   return data
 }
 
-function setAuth(t, u) {
-  token.value = t
-  user.value = u
-  localStorage.setItem('token', t)
-  localStorage.setItem('user', JSON.stringify(u))
-  connectSocket()
+function resetAllOnAuthChange() {
+  // student form
+  studentForm.college = '';
+  studentForm.course = '';
+  studentForm.year = '';
+  studentForm.bio = '';
+  studentForm.photoUrl = '';
+  studentInterests.value = '';
+  studentRaw.value = '';
+
+  // volunteer form
+  profileForm.education = '';
+  profileForm.experience = '';
+  profileForm.bio = '';
+  profileForm.subjects = [];
+  profileForm.languages = [];
+  profileForm.hourlyRate = 0;
+  profileForm.location = '';
+  profileForm.timezone = '';
+  profileForm.specialties = [];
+  profileForm.photoUrl = '';
+  profileSubjects.value = '';
+  profileLanguages.value = '';
+  profileSpecialties.value = '';
 }
+
+function setAuth(t, u) {
+  token.value = t;
+  user.value = u;
+  localStorage.setItem('token', t);
+  localStorage.setItem('user', JSON.stringify(u));
+  resetAllOnAuthChange();
+  connectSocket();
+}
+
 function logout() {
-  token.value = ''
-  user.value = null
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  if (socket.value) socket.value.disconnect()
+  token.value = '';
+  user.value = null;
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  if (socket.value) socket.value.disconnect();
+  resetAllOnAuthChange();
 }
 
 function switchTab(t) {
@@ -1324,6 +1393,22 @@ function switchTab(t) {
 }
 
 function formatDate(d) { try { return new Date(d).toLocaleDateString() } catch { return d } }
+
+// --- 24h -> 12h helpers ---
+function to12h(hhmm = '') {
+  const [hStr, mStr] = String(hhmm).split(':');
+  const h = Number(hStr), m = Number(mStr);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = ((h + 11) % 12) + 1;
+  return `${h12}:${String(m).padStart(2, '0')} ${suffix}`;
+}
+
+function formatSlot12(slot = '') {
+  const [start, end] = String(slot).split('-');
+  if (!end) return to12h(start || slot);
+  return `${to12h(start)} - ${to12h(end)}`;
+}
 
 // auth
 async function signup() {
@@ -1661,22 +1746,18 @@ async function sendSessionRequest() {
   } catch (e) { alert(e.message) }
 }
 
-// Helper to build ISO date string from separate date and time strings
-function buildIsoFromDateTime(dateStr, timeStr) {
-  if (!dateStr || !timeStr) return null
+// Build LOCAL timestamp (ms) from separate strings (YYYY-MM-DD & HH:mm or HH:mm-HH:mm)
+function buildMsFromDateTime(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null;
   try {
-    const d = (() => {
-      const parts = dateStr.split('-').map(Number)
-      if (parts.length !== 3) return null
-      const [y, m, day] = parts
-      const t = String(timeStr).split('-')[0].trim()
-      const [hh, mm] = t.split(':').map(Number)
-      if (Number.isNaN(hh) || Number.isNaN(mm)) return null
-      return new Date(y, m - 1, day, hh, mm, 0)
-    })()
-    return d ? d.toISOString() : null
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    const base = String(timeStr).split('-')[0].trim();
+    const [hh, mm] = base.split(':').map(Number);
+    const dt = new Date(y, m - 1, d, hh, mm, 0, 0); // local
+    const t = dt.getTime();
+    return Number.isNaN(t) ? null : t;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -1695,14 +1776,16 @@ async function loadMyRequests() {
         if (!Number.isNaN(d.getTime())) iso = d.toISOString()
       }
       if (!iso && req.final?.date && req.final?.time) {
-        iso = buildIsoFromDateTime(req.final.date, req.final.time)
+        const ms = buildMsFromDateTime(req.final.date, req.final.time);
+        if (ms !== null) iso = new Date(ms).toISOString();
       }
       if (!iso && req.date && req.time) {
-        iso = buildIsoFromDateTime(req.date, req.time)
+        const ms = buildMsFromDateTime(req.date, req.time);
+        if (ms !== null) iso = new Date(ms).toISOString();
       }
       if (!iso && req.startAt) {
-        const d = (typeof req.startAt === 'number') ? new Date(req.startAt) : new Date(req.startAt)
-        if (!Number.isNaN(d.getTime())) iso = d.toISOString()
+        const d = (typeof req.startAt === 'number') ? new Date(req.startAt) : new Date(req.startAt);
+        if (!Number.isNaN(d.getTime())) iso = d.toISOString();
       }
       const sortTime = iso ? new Date(iso).getTime() : Infinity
       return { ...req, startAt: iso, _sortDate: sortTime }
@@ -1733,19 +1816,29 @@ async function acceptRequest(requestId) {
       return alert('Please select both date and time for the session');
     }
 
-    // Combine date and time into ISO string for the backend
-    const scheduledAt = new Date(`${acceptDate.value}T${acceptTime.value}`).toISOString();
+    // Get the scheduled time in milliseconds (local time)
+    const scheduledAtMs = buildMsFromDateTime(acceptDate.value, acceptTime.value);
+    if (scheduledAtMs === null) {
+      throw new Error('Invalid date or time selected');
+    }
     
-    // Call the accept endpoint with the scheduled time
+    // Call the accept endpoint with the scheduled time in milliseconds
     await api(`/sessions/${requestId}/accept`, {
       method: 'POST',
-      body: JSON.stringify({ scheduledAt })
+      body: JSON.stringify({ 
+        scheduledAt: scheduledAtMs,
+        date: acceptDate.value,  // Include date and time separately as well
+        time: acceptTime.value   // for backward compatibility
+      })
     });
 
     // Refresh the UI
     await loadMyRequests();
     await loadNotifications();
-    alert(`Session accepted and scheduled for ${new Date(scheduledAt).toLocaleString()}`);
+    
+    // Show the scheduled time in local format
+    const scheduledDate = new Date(scheduledAtMs);
+    alert(`Session accepted and scheduled for ${scheduledDate.toLocaleString()}`);
   } catch (e) {
     console.error('Error accepting request:', e);
     alert(e.message || 'Failed to accept session request');
@@ -1876,32 +1969,37 @@ async function bookSlotAsStudent() {
 }
 
 
-// Join (generate join link on demand) - opens the session in a new tab
+// Join a session: prefer showing the Call UI with "Join (external)" button
 async function joinSession(sessionId) {
-  if (!user.value) return alert('Login first');
-  if (!sessionId) return alert('Missing session id');
+  if (!user.value) return alert('Login first')
+  if (!sessionId) return alert('Missing session id')
 
   try {
-    // Backend should create/provide a link only at allowed time and return { joinUrl }
-    const data = await api(`/sessions/${sessionId}/join`, { 
-      method: 'POST', 
-      body: JSON.stringify({}) 
-    });
-    
-    const url = data?.joinUrl || data?.zoomLink || data?.join_link || null;
-    if (!url) {
-      alert('Join link not available yet.');
-      // optionally refresh session state
-      await loadMyRequests();
-      return;
+    // Load/refresh the session object first so we can show the UI correctly
+    // If you have /sessions/:id -> use it; otherwise fall back to /sessions/mine and find it.
+    let s = null
+    try {
+      s = await api(`/sessions/${sessionId}` , { method: 'GET' })
+    } catch {
+      const mine = await api('/sessions/mine', { method: 'GET' })
+      s = (Array.isArray(mine) ? mine : []).find(x => String(x._id) === String(sessionId)) || null
     }
-    // open in new tab
-    window.open(url, '_blank');
+
+    if (!s) {
+      // still show UI and try generating link on demand
+      callRoomSession.value = { _id: sessionId }
+      showCallRoom.value = true
+    } else {
+      callRoomSession.value = s
+      showCallRoom.value = true
+    }
+
+    // if there is already a Zoom link, the CallRoom will show a "Join (external)" button.
+    // If not, you can still click "Generate & Join" inside CallRoom (it will call POST /api/sessions/:id/join)
+
   } catch (err) {
-    console.error('joinSession failed', err);
-    alert(err?.message || 'Failed to generate/join meeting');
-    // refresh session state in case link was created server-side
-    try { await loadMyRequests(); } catch (e) {}
+    console.error('joinSession failed', err)
+    alert(err?.message || 'Failed to start/join session')
   }
 }
 
@@ -1943,9 +2041,15 @@ async function loadDashboard() {
 const WS_URL = import.meta.env.VITE_WS_URL || 'http://localhost:5000';
 
 function connectSocket() {
-  // Disconnect existing socket if any
+  // Don't reconnect if already connected
+  if (socket.value?.connected) {
+    console.log('WebSocket already connected, skipping...');
+    return;
+  }
+
+  // Clean up existing socket if any
   if (socket.value) {
-    socket.value.off(); // Remove all event listeners
+    socket.value.off();
     socket.value.disconnect();
     socket.value = null;
   }
@@ -1962,12 +2066,12 @@ function connectSocket() {
   socket.value = io(WS_URL, {
     transports: ['websocket', 'polling'],
     auth: { token: storedToken },
+    autoConnect: true,
+    forceNew: true,
     reconnectionAttempts: 5,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 10000,
-    timeout: 15000,
-    forceNew: true,
-    autoConnect: true
+    timeout: 15000
   });
 
   // --- connection lifecycle ---
@@ -2012,6 +2116,29 @@ function connectSocket() {
          updatedSession.requestedBy?._id === user.value._id)) {
       loadNotifications();
     }
+  });
+
+  // --- custom: session expired ---
+  socket.value.on('session:expired', ({ _id }) => {
+    if (!_id) return;
+    const idx = myRequests.value.findIndex(r => String(r._id) === String(_id));
+    if (idx !== -1) {
+      myRequests.value[idx] = { ...myRequests.value[idx], status: 'expired' };
+    }
+  });
+
+  // --- custom: session presence ---
+  socket.value.on('session:presence', (payload) => {
+    if (!payload?._id) return;
+    const idx = myRequests.value.findIndex(r => String(r._id) === String(payload._id));
+    if (idx !== -1) {
+      myRequests.value[idx] = { ...myRequests.value[idx], ...('attendance' in payload ? { attendance: payload.attendance } : {}), ...('status' in payload ? { status: payload.status } : {}) };
+    }
+  });
+
+  socket.value.on('session:cancelled', ({ _id }) => {
+    myRequests.value = myRequests.value.filter(r => String(r._id) !== String(_id));
+    try { loadNotifications(); } catch {}
   });
 
   socket.value.on('notification:new', (notification) => {
@@ -2218,35 +2345,63 @@ function scrollToBottom() {
   el.scrollTop = el.scrollHeight
 }
 
+// Cancel a session
+async function cancelSession(sessionOrId) {
+  try {
+    const id = typeof sessionOrId === 'string' ? sessionOrId : (sessionOrId && (sessionOrId._id || sessionOrId.id));
+    if (!id) return alert("Missing request id");
+    
+    // Double confirm (optional but recommended)
+    const ok = confirm("This will cancel the session for both participants. Continue?");
+    if (!ok) return;
+
+    await api(`/sessions/${id}/cancel`, { 
+      method: 'POST', 
+      body: JSON.stringify({}) 
+    });
+
+    // Remove from the list immediately
+    myRequests.value = myRequests.value.filter(r => String(r._id) !== String(id));
+
+    // Refresh notifications (optional)
+    try { 
+      await loadNotifications(); 
+    } catch (e) {
+      console.warn("Failed to refresh notifications:", e);
+    }
+  } catch (e) {
+    console.error("cancelRequest error", e);
+    alert(e?.response?.data?.message || e?.message || "Failed to cancel session");
+  }
+}
+
 // keep myRequests in sync when sockets send session updates
 function updateSessionInList(updated) {
   if (!updated || !updated._id) return;
   const id = String(updated._id);
   const idx = myRequests.value.findIndex(r => String(r._id) === id);
   
-  // regenerate normalized startAt/_sortDate for updated item (same logic as loadMyRequests)
-  const computeIsoFor = (req) => {
+  // compute startAt as ms (local time) for the updated item
+  const computeMsFor = (req) => {
     if (req.scheduledAt) {
-      const d = (typeof req.scheduledAt === 'number') ? new Date(req.scheduledAt) : new Date(req.scheduledAt)
-      if (!Number.isNaN(d.getTime())) return d.toISOString()
+      const t = new Date(req.scheduledAt).getTime();
+      if (!Number.isNaN(t)) return t;
     }
     if (req.final?.date && req.final?.time) {
-      const iso = buildIsoFromDateTime(req.final.date, req.final.time)
-      if (iso) return iso
+      return buildMsFromDateTime(req.final.date, req.final.time);
     }
     if (req.date && req.time) {
-      const iso = buildIsoFromDateTime(req.date, req.time)
-      if (iso) return iso
+      return buildMsFromDateTime(req.date, req.time);
     }
     if (req.startAt) {
-      const d = (typeof req.startAt === 'number') ? new Date(req.startAt) : new Date(req.startAt)
-      if (!Number.isNaN(d.getTime())) return d.toISOString()
+      const t = new Date(req.startAt).getTime();
+      if (!Number.isNaN(t)) return t;
     }
-    return null
-  }
+    return null;
+  };
 
-  const iso = computeIsoFor(updated)
-  const normalized = { ...updated, startAt: iso, _sortDate: iso ? new Date(iso).getTime() : Infinity }
+  const ms = computeMsFor(updated);
+  const normalized = { ...updated, startAt: ms, _sortDate: ms ?? Infinity };
 
   if (idx !== -1) {
     // replace in-place
@@ -2271,33 +2426,27 @@ function updateSessionInList(updated) {
   })
 }
 
-// Handle starting a video call with a user
+// Start a video call with a user (ad-hoc or session-based)
 function startVideoCall(targetUserId) {
   if (!user.value || !targetUserId) return;
-  
-  // Close any open profile modal
+
+  // Close the profile modal if open
   closeProfile();
-  
-  // In a real implementation, you would:
-  // 1. Create a room ID (could be a combination of user IDs or a new unique ID)
-  // 2. Update the CallRoom component with the new room ID
-  // 3. Show the CallRoom component
-  
-  const roomId = [user.value._id, targetUserId].sort().join('_');
-  
-  // For now, we'll just log and show an alert
-  console.log('Starting video call with user:', targetUserId, 'in room:', roomId);
-  alert(`Starting video call with user ${targetUserId} in room ${roomId}`);
-  
-  // In a real implementation, you would update the CallRoom component's props
-  // and show it. For example:
-  // callRoomProps.value = { roomId, targetUserId };
-  // showCallRoom.value = true;
+
+  // Ad-hoc call (no session yet) — you'll use in-app WebRTC room as a fallback
+  // If you want this to always be Zoom, create a session on the server here first, then set callRoomSession to that session.
+  callRoomSession.value = {
+    _id: null,
+    peerId: targetUserId,
+    // no externalJoinLink -> CallRoom will try in-app WebRTC only
+  };
+  showCallRoom.value = true;
 }
 
 // Handle leaving a video call
 function handleLeaveCall() {
-  // Any cleanup needed when leaving a call
+  showCallRoom.value = false;
+  callRoomSession.value = null;
   console.log('Left video call');
 }
 
@@ -2315,11 +2464,30 @@ async function loadMyProgress() {
 // lifecycle
 const _storageHandler = (e) => {
   if (e.key === 'token') {
-    token.value = e.newValue || '';
-    if (!token.value) user.value = null;
-  }
-  if (e.key === 'user') {
-    try { user.value = JSON.parse(e.newValue || 'null'); } catch { user.value = null; }
+    const newToken = e.newValue || '';
+    // Only update if token actually changed
+    if (newToken !== token.value) {
+      token.value = newToken;
+      if (!newToken) {
+        user.value = null;
+        if (socket.value) {
+          socket.value.disconnect();
+          socket.value = null;
+        }
+      } else if (!socket.value?.connected) {
+        connectSocket();
+      }
+    }
+  } else if (e.key === 'user') {
+    try { 
+      const newUser = JSON.parse(e.newValue || 'null');
+      // Only update if user actually changed
+      if (JSON.stringify(newUser) !== JSON.stringify(user.value)) {
+        user.value = newUser;
+      }
+    } catch { 
+      user.value = null; 
+    }
   }
 };
 

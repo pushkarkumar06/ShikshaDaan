@@ -50,6 +50,11 @@ const feedbackSchema = new Schema(
   { _id: false }
 );
 
+const AttendanceSchema = new Schema({
+  joinedAt: Date,
+  leftAt: Date,
+}, { _id: false });
+
 const sessionRequestSchema = new Schema(
   {
     // Who initiated the request (student or volunteer)
@@ -80,6 +85,12 @@ const sessionRequestSchema = new Schema(
     subject: { type: String, required: true },
     message: { type: String },
 
+    // who actually joined/left
+    attendance: {
+      student: { type: AttendanceSchema, default: () => ({}) },
+      volunteer: { type: AttendanceSchema, default: () => ({}) },
+    },
+
     // Status tracking (kept your original names)
     status: {
       type: String,
@@ -91,6 +102,7 @@ const sessionRequestSchema = new Schema(
         "in-progress",   // runtime (note: your UI already uses this style)
         "completed",
         "cancelled",
+        "expired",
       ],
       default: "pending",
       index: true,

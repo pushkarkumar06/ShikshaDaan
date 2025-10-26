@@ -61,134 +61,148 @@ router.get("/room/:roomId", requireAuth, async (req, res) => {
  * Zoom meeting flow
  * --------------------------------------------------------------------------*/
 
-/**
- * Helper: server-side window check (fallback if model method not available)
- * Allows generating a Zoom link from 10 minutes before start until 60 minutes after start.
- */
-function withinGenerateWindowFromISO(startISO) {
-  if (!startISO) return false;
-  const start = new Date(startISO).getTime();
-  const now = Date.now();
-  return start - now <= 10 * 60 * 1000 && now <= start + 60 * 60 * 1000;
+function isParticipant(sr, uid) {
+  const s = String(sr.student?._id || sr.student || "");
+  const v = String(sr.volunteer?._id || sr.volunteer || "");
+  return String(uid) === s || String(uid) === v;
+}
+
+function inferStartDate(sr) {
+  if (sr.scheduledAt) return new Date(sr.scheduledAt);
+  if (sr.final?.startISO) return new Date(sr.final.startISO);
+  if (sr.final?.date && sr.final?.time) return new Date(`${sr.final.date}T${sr.final.time}:00Z`);
+  if (sr.proposed?.date && sr.proposed?.time) return new Date(`${sr.proposed.date}T${sr.proposed.time}:00Z`);
+  return null;
 }
 
 /**
  * POST /api/rtc/zoom/meeting
  * Body: { sessionId }
- * Returns: { ok, zoom: { meetingId, startUrl, joinUrl, password, hostEmail, createdAt } }
  *
- * - Only the student or volunteer on the session may call this.
- * - Enforces the T−10m window (also implemented on the client).
- * - Creates the meeting once and reuses it thereafter.
+ * Creates (or returns) a Zoom meeting for the session.
+ * - Only the student or the volunteer can call it.
+ * - Generation window: from 1 minute before start until the end of the booked slot.
+ * - Returns:
+ *      - joinUrl to both parties
+ *      - startUrl only to the volunteer (host)
+ *      - zoom: persisted zoomMeeting object on the session
  */
 router.post("/zoom/meeting", requireAuth, async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-    const s = await SessionRequest.findById(sessionId)
-      .populate("student", "_id name")
-      .populate("volunteer", "_id name");
+    const sr = await SessionRequest.findById(sessionId)
+      .populate("student", "_id name email")
+      .populate("volunteer", "_id name email");
 
-    if (!s) return res.status(404).json({ error: "Session not found" });
+    if (!sr) return res.status(404).json({ error: "Session not found" });
 
-    const me = String(req.user._id);
-    const parties = [String(s.student?._id), String(s.volunteer?._id)];
-    if (!parties.includes(me)) {
-      return res.status(403).json({ error: "Forbidden" });
+    const uid = req.user._id || req.user.id;
+    const isUserParticipant = isParticipant(sr, uid);
+    if (!isUserParticipant && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Not allowed" });
     }
 
-    // Determine start/end/duration from model
-    const startISO = s.final?.startISO;
-    const endISO = s.final?.endISO;
-    let duration = s.final?.durationMinutes;
-
-    if (!startISO) {
-      return res.status(400).json({ error: "Session start time is not set" });
+    // We allow generation for accepted/scheduled/in-progress — provided time is set.
+    if (!["accepted", "scheduled", "in-progress"].includes(sr.status)) {
+      return res.status(400).json({ error: "Session not scheduled" });
     }
 
-    if (!duration && endISO) {
-      duration = Math.max(15, Math.ceil((new Date(endISO) - new Date(startISO)) / 60000));
-    }
-    if (!duration) duration = 30;
-
-    // Window check: prefer model method if available
-    const allowed =
-      typeof s.isWithinGenerateWindow === "function"
-        ? s.isWithinGenerateWindow()
-        : withinGenerateWindowFromISO(startISO);
-
-    if (!allowed) {
-      return res.status(400).json({ error: "Link can be generated only within 10 minutes of start" });
+    const startAt = inferStartDate(sr);
+    if (!startAt || Number.isNaN(startAt.getTime())) {
+      return res.status(400).json({ error: "Session time not set" });
     }
 
-    // If already created, return existing
-    if (s.zoomMeeting?.meetingId) {
-      return res.json({ ok: true, zoom: s.zoomMeeting });
+    const durationMin =
+      (typeof sr.final?.durationMinutes === "number" && sr.final.durationMinutes > 0)
+        ? sr.final.durationMinutes
+        : 30;
+
+    // Window: from 1 minute before start until the booked slot ends
+    const openFrom = startAt.getTime() - 60 * 1000;                  // 1 minute before
+    const closeAt  = startAt.getTime() + durationMin * 60 * 1000;    // slot end
+    const now = Date.now();
+
+    if (now < openFrom) {
+      return res.status(403).json({ error: "Too early to generate link" });
+    }
+    if (now > closeAt) {
+      return res.status(403).json({ error: "Join window has closed" });
     }
 
-    // Create Zoom meeting
+    const isHost = String(sr.volunteer?._id || sr.volunteer) === String(uid);
+
+    // If a meeting already exists, return it (respect host vs attendee)
+    if (sr.zoomMeeting?.joinUrl) {
+      return res.json({
+        ok: true,
+        joinUrl: sr.zoomMeeting.joinUrl,
+        startUrl: isHost ? sr.zoomMeeting.startUrl : undefined,
+        zoom: sr.zoomMeeting,
+      });
+    }
+
+    // Create a Zoom meeting (server-to-server OAuth inside services/zoom.js)
     const hostEmail = process.env.ZOOM_DEFAULT_HOST_EMAIL;
-    const topic = `ShikshaDaan: ${s.subject || "Session"}`;
-    const agenda = `Volunteer: ${s.volunteer?.name || ""} | Student: ${s.student?.name || ""}`;
+    const topic = `ShikshaDaan: ${sr.subject || "Session"}`;
+    const agenda = `Volunteer: ${sr.volunteer?.name || ""} | Student: ${sr.student?.name || ""}`;
 
-    const z = await createMeeting({
+    const zoom = await createMeeting({
       hostEmail,
       topic,
-      start_time: new Date(startISO).toISOString(),
-      duration,
+      start_time: new Date(startAt).toISOString(),
+      duration: durationMin,
       agenda,
     });
 
-    s.zoomMeeting = {
-      meetingId: z.meetingId,
-      startUrl: z.startUrl,
-      joinUrl: z.joinUrl,
-      password: z.password,
+    sr.zoomMeeting = {
+      meetingId: zoom.meetingId || zoom.id,
+      startUrl: zoom.startUrl || zoom.start_url,
+      joinUrl: zoom.joinUrl || zoom.join_url,
+      password: zoom.password,
       hostEmail,
       createdAt: new Date(),
     };
 
-    // Maintain your status semantics
-    if (s.status === "accepted") s.status = "scheduled";
+    // Mirror for back-compat with older UI
+    sr.final = sr.final || {};
+    sr.final.zoomLink = sr.zoomMeeting.joinUrl;
+    sr.final.meetingId = sr.zoomMeeting.meetingId;
+    sr.final.durationMinutes = durationMin;
+    sr.final.startISO = sr.final.startISO || startAt.toISOString();
+    sr.final.endISO = new Date(startAt.getTime() + durationMin * 60000).toISOString();
+    sr.final.linkCreatedAt = new Date();
+    sr.final.linkExpiresAt = new Date(closeAt);
 
-    // Legacy link mirrors for your existing UI (optional)
-    s.final = s.final || {};
-    s.final.meetingId = z.meetingId;
-    s.final.zoomLink = z.joinUrl;
-    s.final.durationMinutes = duration;
-    s.final.linkCreatedAt = new Date();
-    s.final.linkExpiresAt = new Date(Date.now() + duration * 60000);
+    // Optional: flip accepted → scheduled once a meeting exists
+    if (sr.status === "accepted") sr.status = "scheduled";
 
-    await s.save();
+    await sr.save();
 
-    // Notify both parties that a Zoom link is ready (best-effort)
+    // Notify both parties (best-effort)
     try {
-      const notifPayload = {
-        sessionId: String(s._id),
-        joinUrl: z.joinUrl,
-        startAt: s.final?.startISO,
-        duration,
+      const payload = {
+        sessionId: String(sr._id),
+        joinUrl: sr.zoomMeeting.joinUrl,
+        startAt: sr.final.startISO,
+        duration: durationMin,
       };
       await Notification.insertMany([
-        {
-          user: s.student._id,
-          type: "zoom_link_ready",
-          payload: { ...notifPayload, role: "student" },
-        },
-        {
-          user: s.volunteer._id,
-          type: "zoom_link_ready",
-          payload: { ...notifPayload, role: "volunteer" },
-        },
+        { user: sr.student._id,   type: "zoom_link_ready", payload: { ...payload, role: "student" } },
+        { user: sr.volunteer._id, type: "zoom_link_ready", payload: { ...payload, role: "volunteer" } },
       ]);
     } catch (e) {
       console.warn("zoom/meeting: notification failed:", e?.message || e);
     }
 
-    return res.json({ ok: true, zoom: s.zoomMeeting });
+    return res.json({
+      ok: true,
+      joinUrl: sr.zoomMeeting.joinUrl,
+      startUrl: isHost ? sr.zoomMeeting.startUrl : undefined,
+      zoom: sr.zoomMeeting,
+    });
   } catch (err) {
-    // Log Zoom API errors clearly
     const body = err?.response?.data || err?.message || err;
     console.error("POST /api/rtc/zoom/meeting error:", body);
     return res.status(500).json({ error: "Failed to create/fetch Zoom meeting" });
@@ -205,17 +219,17 @@ router.post("/zoom/end", requireAuth, async (req, res) => {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
 
-    const s = await SessionRequest.findById(sessionId);
-    if (!s?.zoomMeeting?.meetingId) return res.json({ ok: true });
+    const sr = await SessionRequest.findById(sessionId);
+    if (!sr?.zoomMeeting?.meetingId) return res.json({ ok: true });
 
     try {
-      await endMeeting(s.zoomMeeting.meetingId);
+      await endMeeting(sr.zoomMeeting.meetingId);
     } catch (e) {
       console.warn("zoom/end: endMeeting failed (continuing):", e?.message || e);
     }
 
-    s.status = "completed";
-    await s.save();
+    sr.status = "completed";
+    await sr.save();
     return res.json({ ok: true });
   } catch (err) {
     console.error("POST /api/rtc/zoom/end error:", err);
@@ -242,20 +256,21 @@ router.post("/zoom/webhook", async (req, res) => {
     const meetingId = String(req.body?.payload?.object?.id || "");
     if (!meetingId) return res.status(200).send("ok");
 
-    const s = await SessionRequest.findOne({ "zoomMeeting.meetingId": meetingId });
-    if (!s) return res.status(200).send("ok");
+    const sr = await SessionRequest.findOne({ "zoomMeeting.meetingId": meetingId });
+    if (!sr) return res.status(200).send("ok");
 
     if (event === "meeting.started") {
-      s.status = "in-progress";
-      await s.save();
+      sr.status = "in-progress";
+      await sr.save();
     } else if (event === "meeting.ended") {
-      s.status = "completed";
-      await s.save();
+      sr.status = "completed";
+      await sr.save();
     }
     return res.status(200).send("ok");
   } catch (e) {
     console.error("zoom/webhook error:", e);
-    return res.status(200).send("ok"); // Respond 200 so Zoom doesn’t retry aggressively
+    // Always 200 so Zoom doesn't retry too aggressively
+    return res.status(200).send("ok");
   }
 });
 

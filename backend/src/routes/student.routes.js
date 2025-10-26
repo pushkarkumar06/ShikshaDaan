@@ -9,6 +9,35 @@ import cloudinary from "../utils/cloudinary.js";
 
 const router = Router();
 
+/**
+ * GET /api/students/me
+ * Get current student's profile (returns empty object if no profile exists yet)
+ */
+router.get('/me', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const profile = await Student.findOne({ userId }).lean();
+    // If no profile exists yet, return empty object instead of 404
+    if (!profile) return res.json({});
+    
+    // Get user data
+    const user = await User.findById(userId).select('name email').lean();
+    
+    // Normalize photo URL
+    const photoUrl = profile.profilePicture?.url || profile.photoUrl || null;
+    
+    return res.json({
+      ...profile,
+      name: user?.name,
+      email: user?.email,
+      photoUrl // maintain backward compatibility
+    });
+  } catch (err) {
+    console.error('Error in GET /api/students/me:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Multer setup for photo upload
 const MAX_AVATAR_MB = 5;
 const upload = multer({
@@ -27,6 +56,10 @@ async function uploadToCloudinary(buffer) {
   });
 }
 
+/**
+ * GET /api/students/:userId
+ * Public student profile (includes name + photoUrl)
+ */
 /**
  * GET /api/students/:userId
  * Public student profile (includes name + photoUrl)

@@ -4,10 +4,10 @@ import mongoose from "mongoose";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import SessionRequest from "../models/SessionRequest.js";
 import Notification from "../models/Notification.js";
-// ⬇️ use real Zoom API now
 import { createMeeting } from "../services/zoom.js";
 import Volunteer from "../models/volunteer.js";
 import { awardBadgesForVolunteer } from "../services/badges.js";
+import { cancelSession, acceptSession } from "../controllers/session.controller.js";
 
 const router = Router();
 
@@ -18,36 +18,32 @@ const toOID = (v) => new mongoose.Types.ObjectId(v);
 const sameId = (a, b) => String(a) === String(b);
 
 function getUserFromReq(req) {
-  const id = req.user?._id || req.userId || req.user?.id || (req.user ? String(req.user) : undefined);
+  const id   = req.user?._id || req.userId || req.user?.id || (req.user ? String(req.user) : undefined);
   const role = req.user?.role || req.userRole || req.role || undefined;
   const name = req.user?.name || req.userName || null;
   return { id, role, name };
 }
 
-// ----------------- Normalizers / helpers -----------------
+/* ----------------- helpers / normalizers ----------------- */
 
-// Normalizes session dates to ISO strings for consistent client-side handling
 function normalizeSessionForClient(session) {
   if (!session) return null;
   const src = session.toObject ? session.toObject() : session;
   const result = { ...src };
-  const dateFields = [
+  [
     "scheduledAt", "acceptedAt", "createdAt", "updatedAt",
     "completedAt", "rejectedAt", "startAt", "endAt"
-  ];
-  dateFields.forEach((field) => {
-    if (src[field]) result[field] = new Date(src[field]).toISOString();
-    else if (field in src) result[field] = null;
+  ].forEach((k) => {
+    if (src[k]) result[k] = new Date(src[k]).toISOString();
+    else if (k in src) result[k] = null;
   });
   return result;
 }
 
-// Normalize strings by removing spaces and normalizing dash chars
 function normSlot(s = "") {
   return String(s).replace(/\s+/g, "").replace(/–|—/g, "-").trim();
 }
 
-// Build ISO start from various inputs (kept from your file)
 function buildISOStart(session, { date, time, scheduledAt } = {}) {
   if (scheduledAt) return new Date(scheduledAt).toISOString();
 
@@ -56,11 +52,11 @@ function buildISOStart(session, { date, time, scheduledAt } = {}) {
     const [hh = "00", mm = "00"] = clean.split(":");
     const iso = `${date}T${hh.padStart(2, "0")}:${mm.padStart(2, "0")}:00.000Z`;
     const dt = new Date(iso);
-    if (!isNaN(dt.getTime())) return dt.toISOString();
+    if (!Number.isNaN(dt.getTime())) return dt.toISOString();
   }
   if (session?.scheduledAt) {
     const dt = new Date(session.scheduledAt);
-    if (!isNaN(dt.getTime())) return dt.toISOString();
+    if (!Number.isNaN(dt.getTime())) return dt.toISOString();
   }
   if (session?.final?.date && session?.final?.time) {
     return buildISOStart({}, { date: session.final.date, time: session.final.time });
@@ -70,20 +66,18 @@ function buildISOStart(session, { date, time, scheduledAt } = {}) {
   }
   if (session?.startAt) {
     const dt = new Date(session.startAt);
-    if (!isNaN(dt.getTime())) return dt.toISOString();
+    if (!Number.isNaN(dt.getTime())) return dt.toISOString();
   }
   return null;
 }
 
-// derive end ISO given start and duration (minutes)
 function computeEndISO(startISO, durationMin = 30) {
   const start = new Date(startISO);
   if (Number.isNaN(start.getTime())) return null;
-  const end = new Date(start.getTime() + Math.max(1, durationMin) * 60000);
+  const end = new Date(start.getTime() + Math.max(1, durationMin) * 60_000);
   return end.toISOString();
 }
 
-// robust: remove a slot from a volunteer's availability
 async function removeVolunteerSlot(volunteerId, dateStr, timeStr) {
   try {
     if (!volunteerId || !dateStr || !timeStr) return;
@@ -98,7 +92,9 @@ async function removeVolunteerSlot(volunteerId, dateStr, timeStr) {
 
     const wanted = normSlot(timeStr);
     const day = vol.availability.find((d) => {
-      const aDate = typeof d.date === "string" ? d.date : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
+      const aDate = typeof d.date === "string"
+        ? d.date
+        : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
       return aDate === dateStr;
     });
     if (!day || !Array.isArray(day.slots)) return;
@@ -118,7 +114,6 @@ async function removeVolunteerSlot(volunteerId, dateStr, timeStr) {
   }
 }
 
-// safe notification creator (won't throw)
 async function safeNotify(userId, type, payload = {}) {
   try {
     if (!userId) return;
@@ -130,16 +125,17 @@ async function safeNotify(userId, type, payload = {}) {
   }
 }
 
-// ----------------- ROUTES -----------------
+/* ----------------- ROUTES ----------------- */
 
-// ---------- create session request ----------
+/* create session request */
 router.post("/request", requireAuth, async (req, res) => {
   try {
     const { target, subject, message = "", date, time } = req.body;
     const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
-    if (!["student", "volunteer"].includes(userRole))
+    if (!["student", "volunteer"].includes(userRole)) {
       return res.status(403).json({ message: "Only students or volunteers can send requests" });
+    }
     if (!target || !subject) return res.status(400).json({ message: "target and subject are required" });
     if (!isOID(target)) return res.status(400).json({ message: "Invalid target id" });
 
@@ -163,24 +159,19 @@ router.post("/request", requireAuth, async (req, res) => {
       });
       if (exists) return res.status(400).json({ message: "Selected slot is already booked" });
 
-      const vol =
-        (await Volunteer.findOne({ userId: String(volunteerId) }).exec()) ||
-        (isOID(String(volunteerId)) ? await Volunteer.findById(String(volunteerId)).exec() : null);
+      const vol = (await Volunteer.findOne({ userId: String(volunteerId) }).exec())
+        || (isOID(String(volunteerId)) ? await Volunteer.findById(String(volunteerId)).exec() : null);
 
       if (vol && Array.isArray(vol.availability)) {
         const day = vol.availability.find((d) => {
-          const aDate =
-            typeof d.date === "string" ? d.date : d.date ? new Date(d.date).toISOString().split("T")[0] : null;
+          const aDate = typeof d.date === "string" ? d.date : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
           return aDate === date;
         });
-        const ok =
-          day &&
-          Array.isArray(day.slots) &&
-          day.slots.some((s) => {
-            const ns = normSlot(s);
-            const nt = normSlot(time);
-            return ns === nt || ns.startsWith(nt) || nt.startsWith(ns);
-          });
+        const ok = day && Array.isArray(day.slots) && day.slots.some((s) => {
+          const ns = normSlot(s);
+          const nt = normSlot(time);
+          return ns === nt || ns.startsWith(nt) || nt.startsWith(ns);
+        });
         if (!ok) return res.status(400).json({ message: "Volunteer is not available at the requested slot" });
       }
     }
@@ -219,7 +210,7 @@ router.post("/request", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- volunteer offers session proactively ----------
+/* volunteer offers session proactively */
 router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) => {
   try {
     const { studentId, subject, message = "", date, time } = req.body;
@@ -229,23 +220,19 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
     if (!isOID(studentId)) return res.status(400).json({ message: "Invalid studentId" });
 
     if (date && time) {
-      const vol =
-        (await Volunteer.findOne({ userId: String(userId) }).exec()) ||
-        (isOID(String(userId)) ? await Volunteer.findById(String(userId)).exec() : null);
+      const vol = (await Volunteer.findOne({ userId: String(userId) }).exec())
+        || (isOID(String(userId)) ? await Volunteer.findById(String(userId)).exec() : null);
+
       if (vol && Array.isArray(vol.availability)) {
         const day = vol.availability.find((d) => {
-          const aDate =
-            typeof d.date === "string" ? d.date : d.date ? new Date(d.date).toISOString().split("T")[0] : null;
+          const aDate = typeof d.date === "string" ? d.date : (d.date ? new Date(d.date).toISOString().split("T")[0] : null);
           return aDate === date;
         });
-        const ok =
-          day &&
-          Array.isArray(day.slots) &&
-          day.slots.some((s) => {
-            const ns = normSlot(s);
-            const nt = normSlot(time);
-            return ns === nt || ns.startsWith(nt) || nt.startsWith(ns);
-          });
+        const ok = day && Array.isArray(day.slots) && day.slots.some((s) => {
+          const ns = normSlot(s);
+          const nt = normSlot(time);
+          return ns === nt || ns.startsWith(nt) || nt.startsWith(ns);
+        });
         if (!ok) return res.status(400).json({ message: "You don't have that slot in your availability" });
       }
 
@@ -294,173 +281,11 @@ router.post("/offer", requireAuth, requireRole("volunteer"), async (req, res) =>
   }
 });
 
-// ---------- accept (schedules) ----------
-router.post("/:id/accept", requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { scheduledAt, date, time, durationMinutes } = req.body;
-    const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
+/* cancel & accept (controller-based) */
+router.post("/:id/cancel", requireAuth, cancelSession);
+router.post("/:id/accept", requireAuth, acceptSession);
 
-    if (!isOID(id)) return res.status(400).json({ message: "Invalid session id" });
-
-    let sr = await SessionRequest.findById(id);
-    if (!sr) return res.status(404).json({ message: "Session not found" });
-
-    if (!sr.student || !sr.volunteer) {
-      sr.status = "rejected";
-      sr.rejectedAt = new Date();
-      sr.updatedAt = new Date();
-      await sr.save();
-      const populated = await SessionRequest.findById(sr._id)
-        .populate("student", "_id name role")
-        .populate("volunteer", "_id name role")
-        .populate("requestedBy", "_id name role")
-        .lean();
-
-      const otherId =
-        populated.student?._id
-          ? String(populated.student._id)
-          : populated.volunteer?._id
-          ? String(populated.volunteer._id)
-          : null;
-      if (otherId) {
-        await safeNotify(otherId, "session_update", {
-          requestId: populated._id,
-          status: "rejected",
-          actorId: userId || null,
-          actorName: userName || "System",
-          actorRole: "system",
-          subject: populated.subject,
-          message: "Request invalid and auto-rejected",
-        });
-      }
-
-      const io = req.app.locals.io || req.app.get("io");
-      const payload = {
-        _id: String(populated._id),
-        status: "rejected",
-        session: normalizeSessionForClient(populated),
-      };
-      if (io) {
-        const studentId = String(populated.student?._id || populated.student || "");
-        const volunteerId = String(populated.volunteer?._id || populated.volunteer || "");
-        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
-        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
-      }
-
-      return res.json(normalizeSessionForClient(populated));
-    }
-
-    const isParticipant = String(sr.volunteer) === String(userId) || String(sr.student) === String(userId);
-    if (!isParticipant && userRole !== "admin") {
-      return res.status(403).json({ message: "Only participants can accept" });
-    }
-
-    // Build start ISO/time box
-    const startISO = buildISOStart(sr, { date, time, scheduledAt });
-    if (startISO) {
-      const dt = new Date(startISO);
-      if (!isNaN(dt.getTime())) {
-        sr.scheduledAt = dt;
-        sr.final = sr.final || {};
-        sr.final.date = dt.toISOString().split("T")[0];
-        sr.final.time = dt.toISOString().slice(11, 16); // HH:MM
-        sr.final.startISO = dt.toISOString();
-        sr.final.durationMinutes =
-          typeof durationMinutes === "number" && durationMinutes > 0
-            ? durationMinutes
-            : sr.final.durationMinutes || 30;
-        sr.final.endISO = computeEndISO(sr.final.startISO, sr.final.durationMinutes);
-      }
-    }
-
-    sr.status = scheduledAt || (date && time) ? "scheduled" : "accepted";
-    sr.acceptedAt = new Date();
-    sr.updatedAt = new Date();
-    sr.sessionRoomId = sr.sessionRoomId || `session-${sr._id}`;
-
-    if (sr.status === "scheduled") {
-      try {
-        const dateStr = sr.final?.date || (sr.scheduledAt ? sr.scheduledAt.toISOString().split("T")[0] : null);
-        const timeStr = sr.final?.time || (sr.scheduledAt ? sr.scheduledAt.toISOString().slice(11, 16) : null);
-        if (dateStr && timeStr) await removeVolunteerSlot(String(sr.volunteer), dateStr, timeStr);
-      } catch (e) {
-        console.warn("slot removal (accept) failed:", e?.message || e);
-      }
-    }
-
-    await sr.save();
-
-    if (sr.status === "scheduled") {
-      try { await awardBadgesForVolunteer(String(sr.volunteer)); } catch (e) { console.warn("awardBadges failed", e); }
-    }
-
-    const populated = await SessionRequest.findById(sr._id)
-      .populate("student", "_id name role")
-      .populate("volunteer", "_id name role")
-      .populate("requestedBy", "_id name role")
-      .lean();
-
-    const normalizedSession = normalizeSessionForClient(populated);
-    const otherId =
-      String(populated.student?._id || populated.student) === String(userId)
-        ? String(populated.volunteer?._id || populated.volunteer)
-        : String(populated.student?._id || populated.student);
-
-    if (otherId) {
-      await safeNotify(otherId, "session_update", {
-        requestId: populated._id,
-        status: populated.status,
-        actorId: userId,
-        actorName: userName,
-        actorRole: userRole,
-        subject: populated.subject,
-        message: populated.message || "",
-        finalDate: populated.final?.date || null,
-        finalTime: populated.final?.time || null,
-        zoomLink: populated.final?.zoomLink || null,
-      });
-    }
-
-    const io = req.app.locals.io || req.app.get("io");
-    if (io) {
-      try {
-        const studentId = String(populated.student?._id || populated.student || "");
-        const volunteerId = String(populated.volunteer?._id || populated.volunteer || "");
-        const payload = {
-          _id: String(populated._id),
-          status: populated.status,
-          startAt: normalizedSession.scheduledAt,
-          session: normalizedSession,
-        };
-        const eventType = populated.status === "scheduled" ? "session:scheduled" : "session:accepted";
-        if (studentId) {
-          io.to(`user:${studentId}`).emit(eventType, payload);
-          io.to(`user:${studentId}`).emit("notification:session_update", { session: normalizedSession });
-        }
-        if (volunteerId) {
-          io.to(`user:${volunteerId}`).emit(eventType, payload);
-          io.to(`user:${volunteerId}`).emit("notification:session_update", { session: normalizedSession });
-        }
-        io.to("admin").emit("session:updated", { session: normalizedSession });
-      } catch (e) {
-        console.error("Socket emit failed:", e?.message || e);
-      }
-    }
-
-    // NEW: use new scheduler API name (scheduleSession)
-    if (req.app.get("scheduler")) {
-      try { req.app.get("scheduler").scheduleSession(sr); } catch (e) { console.warn("scheduleSession failed", e); }
-    }
-
-    return res.json(normalizeSessionForClient(populated));
-  } catch (err) {
-    console.error("POST /sessions/:id/accept failed:", err);
-    return res.status(500).json({ message: "Server error", error: err.message });
-  }
-});
-
-// ---------- reject ----------
+/* reject */
 router.post("/:id/reject", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -471,16 +296,16 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
     const sr = await SessionRequest.findById(id);
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
-    const studentIdStr = sr.student ? String(sr.student) : null;
+    const studentIdStr   = sr.student ? String(sr.student) : null;
     const volunteerIdStr = sr.volunteer ? String(sr.volunteer) : null;
 
     if (userRole !== "admin" && String(userId) !== studentIdStr && String(userId) !== volunteerIdStr) {
       return res.status(403).json({ message: "Not allowed to reject this request" });
     }
 
-    sr.status = "rejected";
+    sr.status     = "rejected";
     sr.rejectedAt = new Date();
-    sr.updatedAt = new Date();
+    sr.updatedAt  = new Date();
     await sr.save();
 
     const populated = await SessionRequest.findById(sr._id)
@@ -522,13 +347,9 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
     if (io) {
       try {
         const studentId =
-          populated.student?._id ? String(populated.student._id) : populated.student ? String(populated.student) : null;
+          populated.student?._id ? String(populated.student._id) : (populated.student ? String(populated.student) : null);
         const volunteerId =
-          populated.volunteer?._id
-            ? String(populated.volunteer._id)
-            : populated.volunteer
-            ? String(populated.volunteer)
-            : null;
+          populated.volunteer?._id ? String(populated.volunteer._id) : (populated.volunteer ? String(populated.volunteer) : null);
 
         if (studentId) {
           io.to(`user:${studentId}`).emit("session:rejected", payload);
@@ -550,7 +371,7 @@ router.post("/:id/reject", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- generic status updater ----------
+/* generic status updater */
 router.put("/:id/status", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -558,16 +379,16 @@ router.put("/:id/status", requireAuth, async (req, res) => {
     const { id: userId, role: userRole, name: userName } = getUserFromReq(req);
 
     if (!isOID(id)) return res.status(400).json({ message: "Invalid session id" });
-    const allowed = ["accepted", "rejected", "scheduled", "completed", "cancelled"];
+    const allowed = ["accepted", "rejected", "scheduled", "completed", "cancelled", "expired", "in-progress"];
     if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid status" });
 
     const sr = await SessionRequest.findById(id);
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
     if (!sr.student || !sr.volunteer) {
-      sr.status = "rejected";
+      sr.status     = "rejected";
       sr.rejectedAt = new Date();
-      sr.updatedAt = new Date();
+      sr.updatedAt  = new Date();
       await sr.save();
 
       const populated = await SessionRequest.findById(sr._id)
@@ -577,11 +398,9 @@ router.put("/:id/status", requireAuth, async (req, res) => {
         .lean();
 
       const otherId =
-        populated.student?._id
-          ? String(populated.student._id)
-          : populated.volunteer?._id
-          ? String(populated.volunteer._id)
-          : null;
+        populated.student?._id ? String(populated.student._id)
+        : (populated.volunteer?._id ? String(populated.volunteer._id) : null);
+
       if (otherId) {
         await safeNotify(otherId, "session_update", {
           requestId: populated._id,
@@ -597,9 +416,9 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        const studentId = String(populated.student?._id || populated.student || "");
-        const volunteerId = String(populated.volunteer?._id || populated.volunteer || "");
-        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        const studentId  = String(populated.student?._id  || populated.student  || "");
+        const volunteerId= String(populated.volunteer?._id|| populated.volunteer|| "");
+        if (studentId)  io.to(`user:${studentId}`).emit("session:rejected", payload);
         if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
@@ -616,17 +435,17 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       const startISO = buildISOStart(sr, { date, time });
       if (startISO) {
         const dt = new Date(startISO);
-        if (!isNaN(dt.getTime())) {
-          sr.scheduledAt = dt;
-          sr.final = sr.final || {};
-          sr.final.date = dt.toISOString().split("T")[0];
-          sr.final.time = dt.toISOString().slice(11, 16);
-          sr.final.startISO = dt.toISOString();
+        if (!Number.isNaN(dt.getTime())) {
+          sr.scheduledAt   = dt;
+          sr.final         = sr.final || {};
+          sr.final.date    = dt.toISOString().split("T")[0];
+          sr.final.time    = dt.toISOString().slice(11, 16);
+          sr.final.startISO= dt.toISOString();
           sr.final.durationMinutes =
-            typeof durationMinutes === "number" && durationMinutes > 0
+            (typeof durationMinutes === "number" && durationMinutes > 0)
               ? durationMinutes
-              : sr.final.durationMinutes || 30;
-          sr.final.endISO = computeEndISO(sr.final.startISO, sr.final.durationMinutes);
+              : (sr.final.durationMinutes || 30);
+          sr.final.endISO  = computeEndISO(sr.final.startISO, sr.final.durationMinutes);
 
           try {
             await removeVolunteerSlot(String(sr.volunteer), sr.final.date, sr.final.time);
@@ -638,7 +457,9 @@ router.put("/:id/status", requireAuth, async (req, res) => {
     }
 
     if (status === "completed") sr.completedAt = new Date();
-    if (status === "rejected") sr.rejectedAt = new Date();
+    if (status === "rejected")  sr.rejectedAt  = new Date();
+    if (status === "cancelled") sr.cancelledAt = new Date();
+    if (status === "expired")   sr.expiredAt   = new Date();
 
     await sr.save();
 
@@ -659,9 +480,9 @@ router.put("/:id/status", requireAuth, async (req, res) => {
 
     if (io) {
       try {
-        const studentId = String(populated.student?._id || populated.student || "");
-        const volunteerId = String(populated.volunteer?._id || populated.volunteer || "");
-        const eventType = `session:${status}`;
+        const studentId  = String(populated.student?._id  || populated.student  || "");
+        const volunteerId= String(populated.volunteer?._id|| populated.volunteer|| "");
+        const eventType  = `session:${status}`;
         if (studentId) {
           io.to(`user:${studentId}`).emit(eventType, payload);
           io.to(`user:${studentId}`).emit("notification:session_update", { session: normalizedSession });
@@ -675,7 +496,6 @@ router.put("/:id/status", requireAuth, async (req, res) => {
       }
     }
 
-    // (Re)schedule on any significant timing change
     if (req.app.get("scheduler") && ["scheduled", "accepted"].includes(status)) {
       try { req.app.get("scheduler").scheduleSession(sr); } catch (e) { console.warn("scheduleSession failed", e); }
     }
@@ -687,7 +507,7 @@ router.put("/:id/status", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- respond (student/volunteer accept or reject) ----------
+/* respond (student/volunteer accept or reject) */
 router.post("/:id/respond", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -703,9 +523,9 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
     if (!sr.student || !sr.volunteer) {
-      sr.status = "rejected";
+      sr.status     = "rejected";
       sr.rejectedAt = new Date();
-      sr.updatedAt = new Date();
+      sr.updatedAt  = new Date();
       await sr.save();
 
       const populated = await SessionRequest.findById(sr._id)
@@ -715,11 +535,8 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
         .lean();
 
       const otherId =
-        populated.student?._id
-          ? String(populated.student._id)
-          : populated.volunteer?._id
-          ? String(populated.volunteer._id)
-          : null;
+        populated.student?._id ? String(populated.student._id)
+        : (populated.volunteer?._id ? String(populated.volunteer._id) : null);
 
       if (otherId) {
         await safeNotify(otherId, "session_update", {
@@ -736,24 +553,24 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        const studentId = String(populated.student?._id || populated.student || "");
-        const volunteerId = String(populated.volunteer?._id || populated.volunteer || "");
-        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
+        const studentId  = String(populated.student?._id  || populated.student  || "");
+        const volunteerId= String(populated.volunteer?._id|| populated.volunteer|| "");
+        if (studentId)  io.to(`user:${studentId}`).emit("session:rejected", payload);
         if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
       return res.json(normalizeSessionForClient(populated));
     }
 
-    const studentId = String(sr.student?._id || sr.student);
-    const volunteerId = String(sr.volunteer?._id || sr.volunteer);
+    const studentId  = String(sr.student?._id  || sr.student);
+    const volunteerId= String(sr.volunteer?._id|| sr.volunteer);
 
     if (String(userId) !== studentId && String(userId) !== volunteerId && userRole !== "admin") {
       return res.status(403).json({ message: "Not authorized to respond to this request" });
     }
 
     if (action === "rejected") {
-      sr.status = "rejected";
+      sr.status     = "rejected";
       sr.rejectedAt = new Date();
       await sr.save();
 
@@ -779,14 +596,14 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       const io = req.app.locals.io || req.app.get("io");
       const payload = { _id: String(populated._id), status: "rejected", session: populated };
       if (io) {
-        if (studentId) io.to(`user:${studentId}`).emit("session:rejected", payload);
-        if (volunteerId) io.to(`user:${volunteerId}`).emit("session:rejected", payload);
+        if (studentId)  io.to(`user:${studentId}`).emit("session:rejected", payload);
+        if (volunteerId)io.to(`user:${volunteerId}`).emit("session:rejected", payload);
       }
 
       return res.json(normalizeSessionForClient(populated));
     }
 
-    // ACCEPTED: if proposed slot exists, schedule it (NO Zoom creation here; we create near start or via /api/rtc/zoom/meeting)
+    // accepted path
     if (sr.proposed?.date && sr.proposed?.time) {
       const slotTaken = await SessionRequest.exists({
         "final.date": sr.proposed.date,
@@ -823,21 +640,19 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
         });
       }
 
-      // mark scheduled (finalize time + ISO fields)
-      sr.status = "scheduled";
-      sr.final = sr.final || {};
-      sr.final.date = sr.proposed.date;
-      sr.final.time = sr.proposed.time;
-      const startISO = buildISOStart(sr, { date: sr.proposed.date, time: sr.proposed.time });
+      sr.status       = "scheduled";
+      sr.final        = sr.final || {};
+      sr.final.date   = sr.proposed.date;
+      sr.final.time   = sr.proposed.time;
+      const startISO  = buildISOStart(sr, { date: sr.proposed.date, time: sr.proposed.time });
       if (startISO) {
-        sr.scheduledAt = new Date(startISO);
-        sr.final.startISO = startISO;
+        sr.scheduledAt           = new Date(startISO);
+        sr.final.startISO        = startISO;
         sr.final.durationMinutes = sr.final.durationMinutes || 30;
-        sr.final.endISO = computeEndISO(sr.final.startISO, sr.final.durationMinutes);
+        sr.final.endISO          = computeEndISO(sr.final.startISO, sr.final.durationMinutes);
       }
       sr.acceptedAt = new Date();
 
-      // remove slot from volunteer availability
       if (sr.final?.date && sr.final?.time) {
         try { await removeVolunteerSlot(volunteerId, sr.final.date, sr.final.time); } catch (e) {
           console.warn("removeVolunteerSlot (respond) failed:", e?.message || e);
@@ -894,7 +709,9 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       }
 
       if (req.app.get("scheduler")) {
-        try { req.app.get("scheduler").scheduleSession(sr); } catch (e) { console.warn("scheduleSession failed", e); }
+        try { req.app.get("scheduler").scheduleSession(sr); } catch (e) {
+          console.warn("scheduleSession failed", e);
+        }
       }
 
       try { await awardBadgesForVolunteer(String(sr.volunteer)); } catch (e) {
@@ -904,8 +721,8 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
       return res.json(normalizeSessionForClient(populated));
     }
 
-    // no proposed slot — simply accept
-    sr.status = "accepted";
+    // simple accept (no proposed)
+    sr.status     = "accepted";
     sr.acceptedAt = new Date();
     await sr.save();
 
@@ -962,7 +779,85 @@ router.post("/:id/respond", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- join link endpoint (generate/return; now uses real Zoom) ----------
+/* presence (join/leave) */
+router.post("/:id/presence", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action } = req.body; // "join" | "leave"
+    const { id: userId } = getUserFromReq(req);
+
+    const sr = await SessionRequest.findById(id);
+    if (!sr) return res.status(404).json({ message: "Session not found" });
+
+    const isStudent   = String(sr.student)   === String(userId);
+    const isVolunteer = String(sr.volunteer) === String(userId);
+    if (!isStudent && !isVolunteer) return res.status(403).json({ message: "Not a participant" });
+
+    const side = isStudent ? "student" : "volunteer";
+    const now  = new Date();
+
+    if (action === "join") {
+      sr.attendance = sr.attendance || {};
+      sr.attendance[side] = sr.attendance[side] || {};
+      sr.attendance[side].joinedAt = now;
+      if (sr.status === "scheduled") sr.status = "in-progress";
+    } else if (action === "leave") {
+      sr.attendance = sr.attendance || {};
+      sr.attendance[side] = sr.attendance[side] || {};
+      sr.attendance[side].leftAt = now;
+
+      const bothLeft = !!sr.attendance.student?.leftAt && !!sr.attendance.volunteer?.leftAt;
+      if (bothLeft && !["completed", "cancelled", "expired"].includes(sr.status)) {
+        sr.status = "completed";
+      }
+    } else {
+      return res.status(400).json({ message: "Invalid action" });
+    }
+
+    await sr.save();
+
+    const io = req.app.get("io");
+    if (io) {
+      const payload = { _id: String(sr._id), status: sr.status, attendance: sr.attendance };
+      io.to(`user:${sr.student}`).to(`user:${sr.volunteer}`).emit("session:presence", payload);
+    }
+
+    res.json({ ok: true, session: sr });
+  } catch (e) {
+    console.error("presence error", e);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* expire manually when no one joined */
+router.post("/:id/expire", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const sr = await SessionRequest.findById(id);
+    if (!sr) return res.status(404).json({ message: "Session not found" });
+
+    const noOneJoined = !sr.attendance?.student?.joinedAt && !sr.attendance?.volunteer?.joinedAt;
+    if (!noOneJoined) return res.status(400).json({ message: "Someone joined — not expiring" });
+
+    if (["scheduled", "accepted"].includes(sr.status)) {
+      sr.status = "expired";
+      await sr.save();
+
+      const io = req.app.get("io");
+      if (io) {
+        const payload = { _id: String(sr._id), status: "expired" };
+        io.to(`user:${sr.student}`).to(`user:${sr.volunteer}`).emit("session:expired", payload);
+      }
+    }
+
+    res.json({ ok: true, status: sr.status });
+  } catch (e) {
+    console.error("expire error", e);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* join (generate/return; uses real Zoom) */
 router.get("/:id/join", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -970,36 +865,50 @@ router.get("/:id/join", requireAuth, async (req, res) => {
 
     if (!isOID(id)) return res.status(400).json({ message: "Invalid session id" });
 
-    let sr = await SessionRequest.findById(id).populate("student", "_id name role").populate("volunteer", "_id name role");
+    let sr = await SessionRequest.findById(id)
+      .populate("student", "_id name role")
+      .populate("volunteer", "_id name role");
     if (!sr) return res.status(404).json({ message: "Session not found" });
 
     const isParticipant =
-      String(sr.student?._id || sr.student) === String(userId) ||
+      String(sr.student?._id || sr.student)   === String(userId) ||
       String(sr.volunteer?._id || sr.volunteer) === String(userId);
-
     if (!isParticipant && userRole !== "admin") return res.status(403).json({ message: "Not allowed" });
+
     if (sr.status !== "scheduled") return res.status(400).json({ message: "Session not scheduled" });
 
-    // Enforce window (default 10 min before → 60 min after)
-    const startISO = sr.final?.startISO || (sr.scheduledAt ? sr.scheduledAt.toISOString() : null);
-    if (!startISO) return res.status(400).json({ message: "Start time missing" });
+    // Determine start/end from scheduledAt/final
+    const startISO = (sr.final?.startISO)
+      || (sr.scheduledAt ? new Date(sr.scheduledAt).toISOString() : null)
+      || (sr.final?.date && sr.final?.time
+          ? buildISOStart(sr, { date: sr.final.date, time: sr.final.time })
+          : null);
 
-    const now = Date.now();
-    const startMs = Date.parse(startISO);
-    const beforeMin = Number(process.env.MEETING_ALLOW_BEFORE_MIN || 10);
-    const afterMin = Number(process.env.MEETING_ALLOW_AFTER_MIN || 60);
-    if (now < startMs - beforeMin * 60000) {
+    if (!startISO) return res.status(400).json({ message: "Session time not set" });
+
+    const durationMin = sr.final?.durationMinutes ?? 30;
+    const startAt = new Date(startISO);
+    const now = new Date();
+    const windowOpens  = new Date(startAt.getTime() - 15 * 60 * 1000);     // 15 minutes before
+    const windowCloses = new Date(startAt.getTime() + durationMin * 60 * 1000); // close at slot end
+
+    if (now < windowOpens) {
       return res.status(403).json({
-        message: `Join link not yet available. Available at ${new Date(startMs - beforeMin * 60000).toISOString()}`,
+        message: "Join window not open yet",
+        windowOpens: windowOpens.toISOString(),
+        currentTime: now.toISOString(),
       });
     }
-    if (now > startMs + afterMin * 60000) {
-      return res.status(403).json({ message: "Join link expired" });
+    if (now > windowCloses) {
+      return res.status(403).json({
+        message: "Join window has closed",
+        windowClosed: windowCloses.toISOString(),
+        currentTime: now.toISOString(),
+      });
     }
 
-    // If meeting already exists, return it
+    // Existing meeting?
     if (sr.zoomMeeting?.joinUrl) {
-      // Back-compat: also mirror to final.zoomLink if missing
       if (!sr.final?.zoomLink) {
         sr.final = sr.final || {};
         sr.final.zoomLink = sr.zoomMeeting.joinUrl;
@@ -1008,20 +917,15 @@ router.get("/:id/join", requireAuth, async (req, res) => {
       return res.json({ joinUrl: sr.zoomMeeting.joinUrl, startUrl: sr.zoomMeeting.startUrl });
     }
 
-    // Create Zoom meeting now (lazy) — host is default env email
-    const duration =
-      sr.final?.durationMinutes ||
-      (sr.final?.endISO ? Math.max(15, Math.ceil((Date.parse(sr.final.endISO) - startMs) / 60000)) : 30);
-
+    // Create Zoom meeting now
     const z = await createMeeting({
       hostEmail: process.env.ZOOM_DEFAULT_HOST_EMAIL,
       topic: `ShikshaDaan: ${sr.subject || "Session"}`,
-      start_time: new Date(startISO).toISOString(),
-      duration,
+      start_time: startAt.toISOString(),
+      duration: durationMin,
       agenda: `Volunteer: ${sr.volunteer?.name || ""} | Student: ${sr.student?.name || ""}`,
     });
 
-    // Save provider details
     sr.zoomMeeting = {
       meetingId: z.meetingId,
       startUrl: z.startUrl,
@@ -1034,15 +938,12 @@ router.get("/:id/join", requireAuth, async (req, res) => {
     sr.final.zoomLink = z.joinUrl;
     sr.final.meetingId = z.meetingId;
     sr.final.linkCreatedAt = new Date();
-    sr.final.linkExpiresAt = new Date(Date.now() + duration * 60000);
-    sr.final.durationMinutes = duration;
+    sr.final.linkExpiresAt = new Date(startAt.getTime() + durationMin * 60 * 1000);
+    sr.final.durationMinutes = durationMin;
 
-    // optional: flip "accepted" → "scheduled" if it wasn't
     if (sr.status === "accepted") sr.status = "scheduled";
-
     await sr.save();
 
-    // notify the opposite party that link is ready
     const otherId =
       String(userId) === String(sr.student?._id || sr.student)
         ? String(sr.volunteer?._id || sr.volunteer)
@@ -1053,7 +954,7 @@ router.get("/:id/join", requireAuth, async (req, res) => {
         sessionId: sr._id,
         joinUrl: z.joinUrl,
         startAt: startISO,
-        duration,
+        duration: durationMin,
       });
     }
 
@@ -1064,7 +965,7 @@ router.get("/:id/join", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- get my sessions ----------
+/* get my sessions */
 router.get("/mine", requireAuth, async (req, res) => {
   try {
     const { id: uid } = getUserFromReq(req);
@@ -1085,7 +986,7 @@ router.get("/mine", requireAuth, async (req, res) => {
   }
 });
 
-// ---------- feedback ----------
+/* feedback */
 router.post("/:id/feedback", requireAuth, requireRole("student"), async (req, res) => {
   try {
     const { id } = req.params;
@@ -1127,3 +1028,4 @@ router.post("/:id/feedback", requireAuth, requireRole("student"), async (req, re
 });
 
 export default router;
+

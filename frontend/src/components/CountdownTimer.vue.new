@@ -22,9 +22,9 @@
 import { ref, onMounted, onBeforeUnmount, watch, computed } from "vue";
 
 const props = defineProps({
-  /** Scheduled start time: ISO string, ms timestamp, Date, or a local naive "YYYY-MM-DD[ T]HH:mm" */
+  /** Scheduled start time: ISO string, ms timestamp, or Date */
   startAt: { type: [String, Number, Date], required: true },
-  /** Optional end time (ISO/ms/Date). If not provided, use startAt + windowAfterMin */
+  /** Optional end time (ISO/ms/Date). If not provided, we'll use startAt + windowAfterMin */
   endAt: { type: [String, Number, Date], default: null },
   /** If true, keep counting into negative territory (overdue) */
   showOverdue: { type: Boolean, default: false },
@@ -62,33 +62,14 @@ function compute(ms) {
   return { total, days, hours, minutes, seconds };
 }
 
-function pad(n) { return String(n).padStart(2, "0"); }
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
 
-/** Robust timestamp parser that preserves LOCAL time for naive date strings */
 function parseTs(v) {
-  // number ms or Date
   if (v instanceof Date) return v.getTime();
   if (typeof v === "number") return v;
-
-  if (typeof v !== "string") return null;
-  const s = v.trim();
-
-  // numeric string
-  if (/^\d{8,}$/.test(s)) return Number(s);
-
-  // local naive: "YYYY-MM-DD HH:mm" or "YYYY-MM-DDTHH:mm" or with optional seconds
-  const m = s.match(
-    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
-  );
-  if (m && !/[zZ]|[+\-]\d{2}:\d{2}$/.test(s)) {
-    const [, Y, M, D, h, mnt, sec] = m.map(Number);
-    const dt = new Date(Y, M - 1, D, h, mnt, sec || 0, 0); // LOCAL
-    const t = dt.getTime();
-    return Number.isNaN(t) ? null : t;
-  }
-
-  // ISO with timezone (UTC-safe)
-  const p = Date.parse(s);
+  const p = Date.parse(v);
   return Number.isNaN(p) ? null : p;
 }
 
@@ -110,8 +91,9 @@ const windowOpenMs = computed(() => {
 
 /* ------------------------ main updater ------------------------ */
 function update() {
+  // compute countdown to start
   const sMs = startMs.value;
-  if (sMs == null) {
+  if (sMs === null) {
     timeLeft.value = compute(0);
     return;
   }
@@ -127,6 +109,11 @@ function update() {
   if (!reachedZero && diffToStart <= 0) {
     reachedZero = true;
     emit("started", { startAt: new Date(sMs).toISOString() });
+    if (!props.showOverdue && intervalId) {
+      // NOTE: we do NOT stop interval because we still need window-open/close events after start.
+      // If you want the original behavior (stop at start when showOverdue=false), uncomment below:
+      // clearInterval(intervalId); intervalId = null;
+    }
   }
 
   // WINDOW open/close transitions
@@ -140,14 +127,18 @@ function update() {
       });
     } else if (!inWindow && windowIsOpen) {
       windowIsOpen = false;
-      emit("window-close", { closedAt: new Date(now).toISOString() });
+      emit("window-close", {
+        closedAt: new Date(now).toISOString(),
+      });
     }
   }
 
   // ENDED event
   if (windowEndMs.value != null && !endedEmitted && now > windowEndMs.value) {
     endedEmitted = true;
-    emit("ended", { endAt: new Date(windowEndMs.value).toISOString() });
+    emit("ended", {
+      endAt: new Date(windowEndMs.value).toISOString(),
+    });
   }
 }
 
@@ -157,20 +148,19 @@ onMounted(() => {
   intervalId = setInterval(update, props.tickMs);
 });
 
-onBeforeUnmount(() => { if (intervalId) clearInterval(intervalId); });
+onBeforeUnmount(() => {
+  if (intervalId) clearInterval(intervalId);
+});
 
-watch(
-  [() => props.startAt, () => props.endAt, () => props.windowBeforeMin, () => props.windowAfterMin],
-  () => {
-    // reset state on schedule changes
-    reachedZero = false;
-    windowIsOpen = false;
-    endedEmitted = false;
+watch([() => props.startAt, () => props.endAt, () => props.windowBeforeMin, () => props.windowAfterMin], () => {
+  // reset state on schedule changes
+  reachedZero = false;
+  windowIsOpen = false;
+  endedEmitted = false;
 
-    update();
-    if (!intervalId) intervalId = setInterval(update, props.tickMs);
-  }
-);
+  update();
+  if (!intervalId) intervalId = setInterval(update, props.tickMs);
+});
 
 /* ------------------------ computed strings ------------------------ */
 const overdueText = computed(() => {
@@ -181,7 +171,17 @@ const overdueText = computed(() => {
 </script>
 
 <style scoped>
-.countdown { font-weight: 600; font-size: 1rem; color: #1f2937; }
-.live { color: #10b981; }
-.overdue { color: #ef4444; }
+.countdown {
+  font-weight: 600;
+  font-size: 1rem;
+  color: #1f2937;
+}
+
+.live {
+  color: #10b981;
+}
+
+.overdue {
+  color: #ef4444;
+}
 </style>
