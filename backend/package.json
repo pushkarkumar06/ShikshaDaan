@@ -1,11 +1,16 @@
 {
   "name": "backend",
   "version": "1.0.0",
+  "private": true,
   "main": "src/server.js",
   "type": "module",
+  "engines": {
+    "node": ">=20 <21"
+  },
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "build": "echo \"no build step for server\""
   },
   "keywords": [],
   "author": "",
@@ -30,5 +35,3 @@
     "nodemon": "^3.1.10"
   }
 }
-
-
