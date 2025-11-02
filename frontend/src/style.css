@@ -1,0 +1,24 @@
+:root { font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif; }
+body { margin: 0; background: #0b0b0c; color: #f2f2f2; }
+a { color: #9ad; }
+.container { max-width: 1180px; margin: 0 auto; padding: 16px; }
+.card { background: #15161a; border: 1px solid #272a31; border-radius: 12px; padding: 16px; margin: 12px 0; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+input, textarea, select {
+  background: #0f1115; color: #eaeaea; border: 1px solid #2b2f36;
+  padding: 10px 12px; border-radius: 8px; outline: none; width: 100%;
+}
+button {
+  background: #3b82f6; border: none; color: white; padding: 10px 14px;
+  border-radius: 8px; cursor: pointer;
+}
+button.ghost { background: #2b2f36; }
+button.danger { background: #ef4444; }
+label { font-size: 12px; opacity: 0.8; }
+.small { font-size: 12px; opacity: 0.75; }
+.badge { background: #1f2430; border: 1px solid #2e3240; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+.tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.tab { padding: 8px 12px; border-radius: 8px; background: #15161a; border: 1px solid #272a31; cursor: pointer; }
+.tab.active { background: #24314a; border-color: #3b82f6; }
+hr { border: none; border-top: 1px solid #272a31; margin: 16px 0; }
+pre { white-space: pre-wrap; word-break: break-word; }
